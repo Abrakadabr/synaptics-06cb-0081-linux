@@ -12,7 +12,7 @@ Turnkey Linux biometric authentication and enrollment solution for the proprieta
 ## Highlights
 
 - ⚡ **Fast & Responsive:** Verification completes in **~2.5 seconds** (initialization sleeps eliminated).
-- 🔒 **Dual-Boot Safe:** Operates alongside Windows 10/11 without firmware re-flashes or factory resets; preserves the sensor's existing hardware-enrolled database.
+- ⚠️ **Dual-Boot / Pairing Notice:** Enrolling fingers under Linux establishes host pairing in the sensor's internal flash memory. This overwrites previous Windows Hello enrollments, which will need to be re-enrolled if returning to Windows.
 - 👥 **Multi-User Isolation:** Enrolls and tags prints per Linux account (using Windows SID RIDs) with multi-finger slots (1–10). Cross-user authentication attempts are strictly rejected.
 - 🛡️ **Zero-Crash UMDF Emulation:** Includes a binary patch for Lenovo driver v5.5.2731.1050 that eliminates NULL pointer adapter crashes under Wine.
 - 🪟 **PAM Integration:** Out-of-the-box support for `sudo` CLI authentication and **KDE Plasma 6 Wayland** lock screen unlock, with instant, automatic fallback to password authentication.

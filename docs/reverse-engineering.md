@@ -11,7 +11,7 @@ The Synaptics `06cb:0081` is a **Match-on-Chip (MoC)** biometric security device
 ### Key Architectural Characteristics:
 1. **On-Chip Processing:** Raw biometric image data never leaves the physical silicon. Fingerprint capture, feature extraction, template matching, and database storage are performed inside the sensor's embedded secure microcontroller.
 2. **Hardware Cryptoprocessor:** Communicates with the host OS over an encrypted **TLS 1.2 ECDHE** tunnel using client and host certificates negotiated during initial device pairing.
-3. **Template Database in Flash:** Minutiae templates are persisted directly in non-volatile flash memory inside the sensor. Windows and Linux can share the exact same enrolled fingerprints across dual-boot installations without conflict.
+3. **Template Database in Flash:** Minutiae templates are persisted directly in non-volatile flash memory inside the sensor. Note that taking ownership and enrolling under Linux resets previous Windows Hello templates; dual-boot installations cannot concurrently share the same active biometric credentials.
 
 ---
 
