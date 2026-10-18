@@ -1,0 +1,463 @@
+#!/usr/bin/env python3
+# /usr/local/bin/synaptics-bio-delete
+# Fingerprint deletion and user unenrollment utility for Synaptics 06cb:0081 Match-on-Chip sensor
+# Supports deleting specific finger slots (1-10) or completely unenrolling user profiles from on-chip storage.
+
+import os
+import sys
+import subprocess
+import time
+import re
+import json
+import pwd
+import struct
+
+def get_usb_dev_path():
+    try:
+        lsusb = subprocess.check_output(["lsusb"], text=True)
+    except Exception:
+        return None
+    for line in lsusb.splitlines():
+        if "06cb:0081" in line.lower() or ("synaptics" in line.lower() and "0081" in line.lower()):
+            m = re.search(r"Bus\s+(\d+)\s+Device\s+(\d+)", line)
+            if m:
+                return f"/dev/bus/usb/{m.group(1)}/{m.group(2)}"
+    return None
+
+def patch_delete_binary(src_path, dst_path, target_uid, finger_id=None):
+    """
+    Patches enroll.exe to invoke deleteRecord() (IOCTL 0x442034) instead of enroll().
+    - 0x3eb8: replace call enroll() with call deleteRecord()
+    - 0x2423..0x2427: patch target user RID (UID)
+    - 0x244a..0x244e: patch SubFactor (0xF4+slot for single finger, 0xFF for all fingers)
+    - 0x3eaa: patch Sleep(3000) -> NOP NOP
+    - 0x3ebd: patch jump to cleanup & return 0 (skipping Sleep(10000) and identify())
+    """
+    with open(src_path, "rb") as f:
+        data = bytearray(f.read())
+
+    # 1. Patch call in main() at 0x3eb8 from enroll() to deleteRecord()
+    # deleteRecord() is at VMA 0x402dd7; call instruction is at VMA 0x4048b8
+    rel_delete = 0x402dd7 - (0x4048b8 + 5)
+    data[0x3eb8:0x3ebd] = b"\xe8" + struct.pack("<i", rel_delete)
+
+    # 2. Patch target UID (RID) in deleteRecord() at 0x2423..0x2427
+    data[0x2423:0x2427] = struct.pack("<I", target_uid)
+
+    # 3. Patch SubFactor in deleteRecord() at 0x244a..0x244e
+    # Slot 1-10: 0xF4 + finger_id (0xF5..0xFE)
+    # All slots / unenroll: 0xFF (WINBIO_SUBTYPE_ANY)
+    if finger_id is None or finger_id == 0 or finger_id == 0xff:
+        subfactor = 0xff
+    else:
+        subfactor = 0xf4 + finger_id
+    data[0x244a:0x244e] = struct.pack("<I", subfactor)
+
+    # 4. Patch Sleep(3000) at 0x3eaa: ff d0 -> 90 90
+    if data[0x3eaa:0x3eac] == b"\xff\xd0":
+        data[0x3eaa:0x3eac] = b"\x90\x90"
+
+    # 5. Patch jump over Sleep(10000) + identify() at 0x3ebd: 90 90 -> eb 41
+    if data[0x3ebd:0x3ebf] == b"\x90\x90":
+        data[0x3ebd:0x3ebf] = b"\xeb\x41"
+
+    with open(dst_path, "wb") as f:
+        f.write(data)
+    os.chmod(dst_path, 0o755)
+
+def list_enrolled_profiles(opt_dir):
+    cfg_file = os.path.join(opt_dir, "identities.json")
+    if not os.path.exists(cfg_file):
+        print(f"No identities configuration found at {cfg_file}.")
+        return
+
+    try:
+        with open(cfg_file, "r") as f:
+            data = json.load(f)
+    except Exception as e:
+        print(f"Error reading {cfg_file}: {e}", file=sys.stderr)
+        return
+
+    meta = data.get("_metadata", {})
+    users = set(k for k in data.keys() if not k.startswith("_")) | set(meta.keys())
+
+    if not users:
+        print("No enrolled biometric profiles registered in identities.json.")
+        return
+
+    print("==========================================================")
+    print("   Enrolled Synaptics Fingerprint Biometric Profiles")
+    print("==========================================================")
+    for user in sorted(users):
+        try:
+            uinfo = pwd.getpwnam(user)
+            uid_str = f"UID: {uinfo.pw_uid}"
+        except Exception:
+            uid_str = "UID: unknown"
+
+        slots = meta.get(user, {}).get("enrolled_fingers", [])
+        slots_str = ", ".join(f"#{s}" for s in sorted(slots)) if slots else "None"
+        aliases = data.get(user, [])
+        alias_str = ", ".join(aliases) if aliases else user
+
+        print(f"User: {user} ({uid_str})")
+        print(f"  Enrolled finger slots : {slots_str}")
+        print(f"  Hardware SID labels   : {alias_str}")
+        print("----------------------------------------------------------")
+
+def update_identities_after_delete(opt_dir, target_user, finger_id=None):
+    cfg_file = os.path.join(opt_dir, "identities.json")
+    if not os.path.exists(cfg_file):
+        return
+
+    try:
+        with open(cfg_file, "r") as f:
+            data = json.load(f)
+    except Exception:
+        return
+
+    meta = data.get("_metadata", {})
+    user_meta = meta.get(target_user, {})
+    enrolled = user_meta.get("enrolled_fingers", [])
+
+    if finger_id is None or finger_id == 0 or finger_id == 0xff:
+        # Full unenrollment: remove user entirely
+        if target_user in meta:
+            del meta[target_user]
+        if target_user in data:
+            del data[target_user]
+        if target_user == "alex":
+            for k in list(data.keys()):
+                if isinstance(data[k], list) and "Unicorn" in data[k]:
+                    data[k] = [x for x in data[k] if x != "Unicorn"]
+    else:
+        # Single slot removal
+        if finger_id in enrolled:
+            enrolled.remove(finger_id)
+            user_meta["enrolled_fingers"] = sorted(enrolled)
+
+        # If slot 2 is deleted for alex, clean up the legacy Unicorn alias
+        if target_user == "alex" and finger_id == 2:
+            if "alex" in data and isinstance(data["alex"], list):
+                data["alex"] = [x for x in data["alex"] if x != "Unicorn"]
+
+        if not enrolled:
+            # If no fingers remain for user, clean up user entries
+            if target_user in meta:
+                del meta[target_user]
+            if target_user in data:
+                del data[target_user]
+
+    try:
+        with open(cfg_file, "w") as f:
+            json.dump(data, f, indent=4)
+            f.write("\n")
+        os.chmod(cfg_file, 0o666)
+    except Exception as e:
+        print(f"Warning: could not update {cfg_file}: {e}", file=sys.stderr)
+
+def print_usage():
+    print("Usage:")
+    print("  synaptics-bio-delete --list | -l")
+    print("  sudo synaptics-bio-delete <username> <slot> [options]")
+    print("  sudo synaptics-bio-delete <username> --all [options]")
+    print("  sudo synaptics-bio-delete unenroll <username> [options]")
+    print("")
+    print("Commands:")
+    print("  -l, --list             List all registered users and enrolled finger slots")
+    print("  <user> <slot>          Delete specific finger slot (1-10) for <user>")
+    print("  <user> --all | -a      Unenroll user completely and delete all their templates")
+    print("  unenroll <user>        Alias for <user> --all")
+    print("")
+    print("Options:")
+    print("  -f, --force            Skip confirmation prompts")
+    print("  -h, --help             Show this help message")
+    print("")
+    print("Examples:")
+    print("  synaptics-bio-delete --list")
+    print("  sudo synaptics-bio-delete kate 2")
+    print("  sudo synaptics-bio-delete kate --all")
+    print("  sudo synaptics-bio-delete unenroll alex --force")
+
+def main():
+    args = sys.argv[1:]
+
+    if not args or "-h" in args or "--help" in args:
+        print_usage()
+        sys.exit(0)
+
+    opt_dir = "/opt/synaptics-bio"
+    if not os.path.isdir(opt_dir):
+        opt_dir = "/home/alex/synaptics-bio-backup"
+
+    if "-l" in args or "--list" in args:
+        list_enrolled_profiles(opt_dir)
+        sys.exit(0)
+
+    if os.geteuid() != 0:
+        print("Error: Fingerprint deletion requires root privileges (use sudo).", file=sys.stderr)
+        print("Example: sudo synaptics-bio-delete kate 2", file=sys.stderr)
+        sys.exit(1)
+
+    force = False
+    if "-f" in args:
+        force = True
+        args.remove("-f")
+    if "--force" in args:
+        force = True
+        args.remove("--force")
+
+    is_all = False
+    if "-a" in args:
+        is_all = True
+        args.remove("-a")
+    if "--all" in args:
+        is_all = True
+        args.remove("--all")
+    if "all" in args:
+        is_all = True
+        args.remove("all")
+
+    if args and args[0] == "unenroll":
+        is_all = True
+        args.pop(0)
+
+    target_user = None
+    finger_id = None
+
+    for arg in args:
+        if arg.isdigit() and 1 <= int(arg) <= 10:
+            finger_id = int(arg)
+        elif not target_user:
+            target_user = arg
+
+    if not target_user:
+        target_user = os.environ.get("SUDO_USER") or os.environ.get("USER") or "alex"
+
+    try:
+        user_info = pwd.getpwnam(target_user)
+        target_uid = user_info.pw_uid
+    except KeyError:
+        # Check if target_user is a numeric UID
+        if target_user.isdigit():
+            target_uid = int(target_user)
+            try:
+                target_user = pwd.getpwuid(target_uid).pw_name
+            except Exception:
+                pass
+        else:
+            print(f"Error: User '{target_user}' does not exist on this system.", file=sys.stderr)
+            sys.exit(1)
+
+    if not is_all and finger_id is None:
+        print(f"Error: Please specify a finger slot (1-10) or --all to unenroll '{target_user}'.", file=sys.stderr)
+        print(f"Run 'synaptics-bio-delete --list' to see enrolled slots.", file=sys.stderr)
+        sys.exit(1)
+
+    # Check identities.json for existing registration
+    cfg_file = os.path.join(opt_dir, "identities.json")
+    enrolled_slots = []
+    if os.path.exists(cfg_file):
+        try:
+            with open(cfg_file, "r") as f:
+                cdata = json.load(f)
+            enrolled_slots = cdata.get("_metadata", {}).get(target_user, {}).get("enrolled_fingers", [])
+        except Exception:
+            pass
+
+    if not is_all and finger_id is not None and finger_id not in enrolled_slots:
+        print(f"Notice: Finger slot #{finger_id} is not recorded in identities.json for user '{target_user}'.")
+        if enrolled_slots:
+            print(f"Currently enrolled slots for '{target_user}': {', '.join(f'#{s}' for s in enrolled_slots)}")
+        else:
+            print(f"User '{target_user}' currently has no enrolled finger slots recorded.")
+
+    # Interactive confirmation prompt
+    if not force:
+        if is_all:
+            prompt_msg = f"Are you sure you want to completely unenroll '{target_user}' and purge ALL templates from sensor? [y/N]: "
+        else:
+            prompt_msg = f"Delete fingerprint slot #{finger_id} for user '{target_user}'? [y/N]: "
+
+        try:
+            choice = input(prompt_msg).strip().lower()
+        except (KeyboardInterrupt, EOFError):
+            print("\nOperation cancelled.")
+            sys.exit(1)
+
+        if choice not in ("y", "yes"):
+            print("Operation cancelled.")
+            sys.exit(0)
+
+    base_enroll_exe = os.path.join(opt_dir, "enroll.exe")
+    if not os.path.exists(base_enroll_exe):
+        print(f"Error: {base_enroll_exe} not found.", file=sys.stderr)
+        sys.exit(1)
+
+    pid = os.getpid()
+    container_name = f"synaptics-bio-delete-{pid}"
+    patched_exe_name = f"delete-{target_user}-{pid}.exe"
+    patched_exe_path = os.path.join(opt_dir, patched_exe_name)
+    trace_file = f"usb-trace-{pid}.txt"
+    trace_path = os.path.join(opt_dir, trace_file)
+
+    # Sanitize environment
+    clean_env = os.environ.copy()
+    for var in ["XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "XDG_SESSION_ID", "XDG_DATA_DIRS"]:
+        clean_env.pop(var, None)
+    clean_env["HOME"] = "/root"
+    clean_env["PATH"] = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+    print("==========================================================")
+    print("   Synaptics Fingerprint Deletion")
+    print("==========================================================")
+    print(f"Target User : {target_user} (UID: {target_uid})")
+    if is_all:
+        print("Action      : UNENROLL (Purging all enrolled finger slots)")
+    else:
+        print(f"Action      : Delete Finger Slot #{finger_id}")
+    print("==========================================================")
+
+    # 1. Clean up any stale processes/containers
+    subprocess.run(["pkill", "-x", "identify.exe"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(["pkill", "-x", "enroll.exe"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(["podman", "rm", "-f", container_name], env=clean_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    # 2. Disable USB autosuspend
+    power_ctrl = "/sys/bus/usb/devices/1-5/power/control"
+    if os.path.exists(power_ctrl):
+        try:
+            with open(power_ctrl, "w") as f_pwr:
+                f_pwr.write("on\n")
+        except Exception:
+            pass
+
+    # 3. Reset USB device to ensure clean state
+    print("[Fingerprint] Initializing sensor hardware...", flush=True)
+    try:
+        subprocess.run(["usbreset", "06cb:0081"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
+    except Exception:
+        pass
+    time.sleep(1.5)
+
+    # 4. Locate USB device node dynamically
+    dev_path = get_usb_dev_path()
+    if not dev_path or not os.path.exists(dev_path):
+        print("Error: Synaptics 06cb:0081 sensor not found on USB.", file=sys.stderr)
+        sys.exit(1)
+
+    # 5. Determine UIDs to purge on-chip
+    uids_to_purge = [target_uid]
+    if target_user == "alex" and (is_all or finger_id == 2):
+        if 1261 not in uids_to_purge:
+            uids_to_purge.append(1261)
+
+    # Locate Podman container image
+    image_candidates = [
+        "localhost/wine:validity",
+        "wine:validity",
+        "ghcr.io/abrakadabr/synaptics-06cb-0081-linux:latest"
+    ]
+    image = "localhost/wine:validity"
+    for candidate in image_candidates:
+        try:
+            res = subprocess.run(["podman", "image", "exists", candidate], env=clean_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if res.returncode == 0:
+                image = candidate
+                break
+        except Exception:
+            pass
+
+    deleted = False
+
+    for current_uid in uids_to_purge:
+        patch_delete_binary(base_enroll_exe, patched_exe_path, current_uid, None if is_all else finger_id)
+
+        cmd = [
+            "podman", "run", "--rm",
+            "--init",
+            "--name", container_name,
+            "--net=none",
+            "--security-opt", "label=disable",
+            "--device", dev_path,
+            "-v", "/dev/bus/usb:/dev/bus/usb",
+            "-e", "WINEPATH=/usr/lib/gcc/x86_64-w64-mingw32/10-win32;/usr/x86_64-w64-mingw32/lib",
+            "-e", "WINEDEBUG=fixme-all,err-all",
+            "-w", opt_dir,
+            "-e", f"USB_SCRIPT={trace_file}",
+            "-v", f"{opt_dir}:{opt_dir}",
+            "-v", f"{opt_dir}/usb.txt:/root/.wine/drive_c/usb.txt",
+            image,
+            "sh", "-c", f"wine64 ./{patched_exe_name}"
+        ]
+
+        proc = None
+        try:
+            print(f"[Fingerprint] Sending deletion command to on-chip storage (UID/RID: {current_uid})...", flush=True)
+            proc = subprocess.Popen(
+                cmd,
+                env=clean_env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                errors="replace",
+                bufsize=1
+            )
+
+            for line in proc.stdout:
+                if "Got back 0x" in line or "Complete: 0" in line:
+                    deleted = True
+
+            proc.wait()
+
+        except KeyboardInterrupt:
+            print("\n[Fingerprint] Deletion canceled by user.", flush=True)
+            break
+        except Exception as e:
+            print(f"\n[Fingerprint] Error during deletion (UID: {current_uid}): {e}", file=sys.stderr)
+        finally:
+            if proc and proc.poll() is None:
+                try:
+                    proc.terminate()
+                    proc.wait(timeout=2)
+                except Exception:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+            subprocess.run(["podman", "rm", "-f", container_name], env=clean_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if os.path.exists(patched_exe_path):
+                try:
+                    os.remove(patched_exe_path)
+                except Exception:
+                    pass
+            if os.path.exists(trace_path):
+                try:
+                    os.remove(trace_path)
+                except Exception:
+                    pass
+
+        # Reset USB device so sensor is clean and immediately ready for PAM auth
+        try:
+            subprocess.run(["usbreset", "06cb:0081"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
+        except Exception:
+            pass
+
+    if deleted:
+        update_identities_after_delete(opt_dir, target_user, None if is_all else finger_id)
+        print("")
+        print("==========================================================")
+        if is_all:
+            print(f"Success: User '{target_user}' completely unenrolled.")
+            print("All on-chip fingerprint templates have been purged.")
+        else:
+            print(f"Success: Finger slot #{finger_id} deleted for user '{target_user}'.")
+            print("Template removed from on-chip secure storage.")
+        print("==========================================================")
+        sys.exit(0)
+    else:
+        print("\n[Fingerprint] Hardware deletion command could not be completed.", file=sys.stderr)
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()

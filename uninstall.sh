@@ -49,7 +49,8 @@ fi
 # 4. Remove CLI wrappers
 rm -f /usr/local/bin/synaptics-bio-auth
 rm -f /usr/local/bin/synaptics-bio-enroll
-echo "Removed /usr/local/bin/synaptics-bio-auth and synaptics-bio-enroll."
+rm -f /usr/local/bin/synaptics-bio-delete
+echo "Removed /usr/local/bin/synaptics-bio-auth, synaptics-bio-enroll, and synaptics-bio-delete."
 
 # 5. Clean /opt/synaptics-bio
 OPT_DIR="/opt/synaptics-bio"

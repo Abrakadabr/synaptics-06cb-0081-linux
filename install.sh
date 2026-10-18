@@ -136,7 +136,8 @@ udevadm trigger
 
 cp "${SCRIPT_DIR}/bin/synaptics-bio-auth" /usr/local/bin/synaptics-bio-auth
 cp "${SCRIPT_DIR}/bin/synaptics-bio-enroll" /usr/local/bin/synaptics-bio-enroll
-chmod 755 /usr/local/bin/synaptics-bio-auth /usr/local/bin/synaptics-bio-enroll
+cp "${SCRIPT_DIR}/bin/synaptics-bio-delete" /usr/local/bin/synaptics-bio-delete
+chmod 755 /usr/local/bin/synaptics-bio-auth /usr/local/bin/synaptics-bio-enroll /usr/local/bin/synaptics-bio-delete
 
 # 7. Configure PAM (sudo & KDE lock screen)
 echo "[7/7] Configuring PAM authentication stack..."

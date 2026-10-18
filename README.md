@@ -116,6 +116,52 @@ sudo synaptics-bio-enroll kate 2    # Enroll Kate's secondary finger (Slot 2)
 
 ---
 
+## Managing & Deleting Fingerprints
+
+### List Enrolled Fingerprints
+List all registered users, their on-chip SID mappings, and enrolled finger slots:
+```bash
+synaptics-bio-delete --list
+```
+Example output:
+```text
+==========================================================
+   Enrolled Synaptics Fingerprint Biometric Profiles
+==========================================================
+User: alex (UID: 1000)
+  Enrolled finger slots : #1
+  Hardware SID labels   : alex, Unicorn
+----------------------------------------------------------
+User: kate (UID: 1001)
+  Enrolled finger slots : #1, #2
+  Hardware SID labels   : kate
+----------------------------------------------------------
+```
+
+### Delete a Specific Finger Slot
+To delete a single finger template from the sensor's secure chip storage:
+```bash
+sudo synaptics-bio-delete <username> <slot 1-10>
+
+# Example: Delete finger slot #2 for user 'kate'
+sudo synaptics-bio-delete kate 2
+```
+
+### Unenroll a User (Purge All Templates)
+To completely unenroll a user and remove all their fingerprint templates from the sensor:
+```bash
+sudo synaptics-bio-delete <username> --all
+# Or using the unenroll command:
+sudo synaptics-bio-delete unenroll <username>
+
+# Example:
+sudo synaptics-bio-delete kate --all
+```
+
+> **Note:** To bypass interactive confirmation prompts in automated scripts, pass `--force` (or `-f`).
+
+---
+
 ## Verifying Authentication
 
 Test `sudo` biometric authentication:
