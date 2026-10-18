@@ -1,0 +1,322 @@
+#!/usr/bin/env python3
+# /usr/local/bin/synaptics-bio-auth
+# Biometric PAM helper for Synaptics 06cb:0081 Match-on-Sensor
+# Supports multi-user isolation with per-user identity matching
+
+import os
+import sys
+import subprocess
+import time
+import re
+import json
+
+def get_usb_dev_path():
+    try:
+        lsusb = subprocess.check_output(["lsusb"], text=True)
+    except Exception:
+        return None
+    for line in lsusb.splitlines():
+        if "06cb:0081" in line.lower() or ("synaptics" in line.lower() and "0081" in line.lower()):
+            m = re.search(r"Bus\s+(\d+)\s+Device\s+(\d+)", line)
+            if m:
+                return f"/dev/bus/usb/{m.group(1)}/{m.group(2)}"
+    return None
+
+def extract_matched_identity(line, all_identities=None):
+    """
+    Extracts the biometric identity string from decrypted WinUSB trace logs
+    or driver response buffers.
+    Format: Decrypted: <hex string>
+    The on-chip Match-on-Sensor returns a WINBIO_ID packet with Type=3 (SID),
+    containing signature \x08\x00\x03\x00 (packet type 8 = match result, type 3 = SID).
+    """
+    if line.startswith("Decrypted:"):
+        try:
+            parts = line.split()
+            if len(parts) >= 2:
+                raw_bytes = bytes.fromhex(parts[1])
+                # Check for Match Result signature: \x08\x00\x03\x00 (Type=8 Match, Subtype=3 SID)
+                idx = raw_bytes.find(b'\x08\x00\x03\x00')
+                if idx != -1 and len(raw_bytes) >= idx + 12:
+                    id_len = int.from_bytes(raw_bytes[idx+10:idx+12], 'little')
+                    if 2 <= id_len <= 32 and len(raw_bytes) >= idx + 12 + id_len:
+                        ident = raw_bytes[idx+12:idx+12+id_len].rstrip(b'\x00').decode('utf-8', errors='ignore')
+                        if re.match(r'^[a-zA-Z0-9_\-\.]{2,32}$', ident):
+                            return ident
+        except Exception:
+            pass
+
+        # Direct hex / string check for any known identity in decrypted line
+        if all_identities:
+            for candidate in all_identities:
+                cand_hex = candidate.encode('utf-8').hex()
+                if cand_hex in line:
+                    return candidate
+
+    # Also check driver return buffer: Got back 0x888 bytes: ...
+    if "Got back 0x888 bytes:" in line and all_identities:
+        try:
+            hex_part = line.split("bytes:")[1].strip()
+            raw_bytes = bytes.fromhex(hex_part)
+            for candidate in all_identities:
+                if candidate.encode('utf-8') in raw_bytes:
+                    return candidate
+        except Exception:
+            pass
+
+    return None
+
+def main():
+    if os.path.exists("/tmp/disable-bio-auth"):
+        sys.exit(1)
+
+    log_file = "/tmp/synaptics-bio-auth.log"
+    pid = os.getpid()
+    container_name = f"synaptics-bio-auth-{pid}"
+
+    # Determine target user being authenticated
+    target_user = None
+    if len(sys.argv) > 1 and not sys.argv[1].startswith("-"):
+        target_user = sys.argv[1]
+    if not target_user:
+        target_user = os.environ.get("PAM_USER")
+    if not target_user:
+        target_user = os.environ.get("SUDO_USER")
+    if not target_user:
+        target_user = os.environ.get("USER") or "alex"
+
+    # Load configured allowed biometric identities for this user
+    config_file = "/opt/synaptics-bio/identities.json"
+    if not os.path.exists(config_file):
+        config_file = "/etc/synaptics-bio/identities.json"
+
+    allowed_identities = {target_user}
+    all_identities = {target_user, "Unicorn", "alex", "kate"}
+    if os.path.exists(config_file):
+        try:
+            with open(config_file, "r") as f_cfg:
+                ident_map = json.load(f_cfg)
+            for u, aliases in ident_map.items():
+                if u.startswith("_"):
+                    continue
+                all_identities.add(u)
+                if isinstance(aliases, list):
+                    for a in aliases:
+                        all_identities.add(a)
+            if target_user in ident_map and isinstance(ident_map[target_user], list):
+                for alias in ident_map[target_user]:
+                    allowed_identities.add(alias)
+        except Exception:
+            pass
+
+    # 'Unicorn' is the legacy alias for initial baseline enrollment
+    if target_user == "alex":
+        allowed_identities.add("Unicorn")
+
+    # If running with root effective privileges under PAM, adopt full root credentials
+    if os.geteuid() == 0:
+        try:
+            os.setgid(0)
+            os.setuid(0)
+        except Exception:
+            pass
+
+    # Sanitize environment unconditionally to isolate Podman & Wine from user sessions
+    clean_env = os.environ.copy()
+    for var in ["XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "XDG_SESSION_ID", "XDG_DATA_DIRS"]:
+        clean_env.pop(var, None)
+        os.environ.pop(var, None)
+    clean_env["HOME"] = "/root" if os.geteuid() == 0 else os.path.expanduser("~")
+    clean_env["PATH"] = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    os.environ["HOME"] = clean_env["HOME"]
+    os.environ["PATH"] = clean_env["PATH"]
+
+    # Rotate log if larger than 1MB to prevent tmpfs memory consumption
+    if os.path.exists(log_file) and os.path.getsize(log_file) > 1024 * 1024:
+        try:
+            with open(log_file, "r") as f_prev:
+                prev_lines = f_prev.readlines()
+            with open(log_file, "w") as f_prev:
+                f_prev.writelines(prev_lines[-1000:])
+        except Exception:
+            pass
+
+    with open(log_file, "a") as f_log:
+        f_log.write(f"\n--- Auth attempt at {time.ctime()} (PID {pid}) ---\n")
+        f_log.write(f"Target User: {target_user} (Allowed Identities: {sorted(list(allowed_identities))})\n")
+        f_log.write(f"UID={os.getuid()} EUID={os.geteuid()}\n")
+
+    print(f"[Fingerprint] Sensor initializing for {target_user} (~3s)...", flush=True)
+
+    # 1. Clean up any stale wine/identify processes or lingering containers
+    subprocess.run(["pkill", "-x", "identify.exe"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(["podman", "rm", "-f", container_name], env=clean_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    # 2. Ensure USB device is awake (disable autosuspend if it was suspended during sleep)
+    power_ctrl = "/sys/bus/usb/devices/1-5/power/control"
+    if os.path.exists(power_ctrl):
+        try:
+            with open(power_ctrl, "w") as f_pwr:
+                f_pwr.write("on\n")
+        except Exception:
+            pass
+
+    # 3. Reset USB device to ensure cryptoprocessor starts in State 0
+    try:
+        subprocess.run(["usbreset", "06cb:0081"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
+    except Exception:
+        pass
+    time.sleep(1.5)
+
+    # 4. Locate USB device node dynamically
+    dev_path = get_usb_dev_path()
+    if not dev_path or not os.path.exists(dev_path):
+        with open(log_file, "a") as f_log:
+            f_log.write("Device 06cb:0081 not found\nResult: FAIL/FALLBACK\n")
+        sys.exit(1)
+
+    opt_dir = "/opt/synaptics-bio"
+    if not os.path.isdir(opt_dir):
+        opt_dir = "/home/alex/synaptics-bio-backup"
+
+    image_candidates = [
+        "localhost/wine:validity",
+        "wine:validity",
+        "ghcr.io/abrakadabr/synaptics-06cb-0081-linux:latest"
+    ]
+    image = "localhost/wine:validity"
+    for candidate in image_candidates:
+        try:
+            res = subprocess.run(["podman", "image", "exists", candidate], env=clean_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if res.returncode == 0:
+                image = candidate
+                break
+        except Exception:
+            pass
+
+    cmd = [
+        "podman", "run", "--rm",
+        "--init",
+        "--name", container_name,
+        "--net=none",
+        "--security-opt", "label=disable",
+        "--device", dev_path,
+        "-v", "/dev/bus/usb:/dev/bus/usb",
+        "-e", "WINEPATH=/usr/lib/gcc/x86_64-w64-mingw32/10-win32;/usr/x86_64-w64-mingw32/lib",
+        "-e", "WINEDEBUG=fixme-all,err-all,trace+winusb",
+        "-w", opt_dir,
+        "-e", "USB_SCRIPT=/tmp/usb-trace.txt",
+        "-v", f"{opt_dir}:{opt_dir}",
+        "-v", f"{opt_dir}/usb.txt:/root/.wine/drive_c/usb.txt",
+        image,
+        "sh", "-c", "wine64 ./identify.exe identify"
+    ]
+
+    proc = None
+    ready_announced = False
+    polling_armed = False
+    contact_detected = False
+    success = False
+    matched_identity = None
+    wrong_user_match = None
+    start_time = time.time()
+
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            env=clean_env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            errors="replace",
+            bufsize=1
+        )
+
+        while True:
+            # 30s timeout
+            if time.time() - start_time > 30:
+                with open(log_file, "a") as f_log:
+                    f_log.write("Timeout waiting for fingerprint\n")
+                break
+
+            line = proc.stdout.readline()
+            if not line and proc.poll() is not None:
+                break
+
+            if line:
+                with open(log_file, "a") as f_log:
+                    f_log.write(line)
+
+                # Sensor is armed and actively waiting for finger touch
+                if not ready_announced and ("about to IOCTL_BIOMETRIC_CAPTURE_DATA" in line or "PipeID=131" in line or "libusb_interrupt_transfer=-7!" in line):
+                    ready_announced = True
+                    print(f"\n[Fingerprint Auth] >>> Place enrolled finger to authenticate as '{target_user}' <<<", flush=True)
+
+                # Polling loop entered (-7! indicates sensor is actively awaiting finger touch on pipe 131)
+                if ready_announced and "libusb_interrupt_transfer=-7!" in line:
+                    polling_armed = True
+
+                # Physical contact detected: either transfer=0! after entering polling loop, or capture data arrived (sz=80)
+                if ready_announced and not contact_detected and ("sz=80" in line or (polling_armed and "libusb_interrupt_transfer=0!" in line)):
+                    contact_detected = True
+                    print("[Fingerprint] Contact detected, scanning...", flush=True)
+
+                # Check for on-chip template match
+                matched_id = extract_matched_identity(line, all_identities)
+                if matched_id:
+                    matched_identity = matched_id
+                    if matched_id in allowed_identities:
+                        success = True
+                    else:
+                        wrong_user_match = matched_id
+                    break
+
+                # If no match occurred from on-chip comparison
+                if "1f800980" in line or "WINBIO_E_NO_MATCH" in line:
+                    contact_detected = False
+                    print("[Fingerprint] Not recognized. Adjust finger and try again...", flush=True)
+
+        if proc and proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except Exception:
+                proc.kill()
+
+    except Exception as e:
+        with open(log_file, "a") as f_log:
+            f_log.write(f"Exception during auth: {e}\n")
+    finally:
+        if proc and proc.poll() is None:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        try:
+            subprocess.run(["podman", "rm", "-f", container_name], env=clean_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=4)
+        except Exception:
+            pass
+
+    if success:
+        print(f"[Fingerprint verified for {target_user}]", flush=True)
+        with open(log_file, "a") as f_log:
+            f_log.write(f"Result: SUCCESS (Target: {target_user}, Matched identity: {matched_identity})\n")
+        sys.exit(0)
+    elif wrong_user_match:
+        print(f"\n[Fingerprint] Scanned finger belongs to '{wrong_user_match}', not '{target_user}'.", flush=True)
+        with open(log_file, "a") as f_log:
+            f_log.write(f"Result: DENIED (Target: {target_user}, but matched: {wrong_user_match})\n")
+        sys.exit(1)
+    else:
+        with open(log_file, "a") as f_log:
+            f_log.write(f"Result: FAIL/FALLBACK (Target: {target_user})\n")
+        # On failure, recover sensor by clearing state
+        try:
+            subprocess.run(["usbreset", "06cb:0081"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
+            time.sleep(1.0)
+        except Exception:
+            pass
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()

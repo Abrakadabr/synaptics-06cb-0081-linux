@@ -1,0 +1,3 @@
+# /etc/pam.d/sudo integration snippet
+# Insert before "auth include system-auth"
+auth       sufficient   pam_exec.so quiet stdout /usr/local/bin/synaptics-bio-auth

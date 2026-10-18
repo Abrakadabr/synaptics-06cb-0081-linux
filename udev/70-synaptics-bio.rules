@@ -1,0 +1,3 @@
+# /etc/udev/rules.d/70-synaptics-bio.rules
+# Synaptics / Validity 06cb:0081 fingerprint sensor userland access and autosuspend management
+SUBSYSTEM=="usb", ATTRS{idVendor}=="06cb", ATTRS{idProduct}=="0081", MODE="0666", TEST=="power/control", ATTR{power/control}="on"

@@ -1,0 +1,42 @@
+# Proprietary vendor driver binaries (strictly prohibited from git)
+*.dll
+*.sys
+*.cat
+*.inf
+synawudfbiousb.dll*
+synaAdvAdapter.dll*
+
+# Hardware-specific state & crypto blobs
+*.blob
+*.blob.*
+*.uint
+
+# Large image backups and containers
+*.tar
+*.tar.*
+*.zst
+
+# Runtime logs and traces
+*.log
+*-wine.log
+*-usb.txt
+usb-trace*.txt
+
+# Build artifacts
+*.o
+*.a
+*.exe.bak
+
+# IDE / Editor / System
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+__pycache__/
+*.pyc
+
+# Keep dist files and precompiled open-source harness executables
+!identities.json.dist
+!src/identify.exe
+!src/enroll.exe

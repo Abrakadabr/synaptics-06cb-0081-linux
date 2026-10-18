@@ -1,0 +1,70 @@
+# Containerfile for Synaptics 06cb:0081 WinUSB / UMDF Execution Environment
+# Builds a headless 64-bit Wine runtime equipped with the fake WinUSB stub driver
+# Source repository: https://github.com/uunicorn/wine (branch: hacking/validiy-sensor)
+
+FROM debian:bullseye AS builder
+
+WORKDIR /root
+
+RUN sed -i 's|http://deb.debian.org/debian-security|http://archive.debian.org/debian-security|g' /etc/apt/sources.list && \
+    apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    build-essential \
+    autoconf \
+    pkg-config \
+    flex \
+    bison \
+    fontforge \
+    librsvg2-bin \
+    imagemagick \
+    icoutils \
+    gettext \
+    libgnutls28-dev \
+    libgettextpo-dev \
+    libxml-libxml-perl \
+    libssl-dev \
+    libusb-1.0.0-dev \
+    gcc-mingw-w64-x86-64 \
+    g++-mingw-w64-x86-64 \
+    mingw-w64-tools \
+    mingw-w64-x86-64-dev \
+    mingw-w64 \
+    mingw-w64-common && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN git clone --depth 1 https://github.com/uunicorn/wine.git -b hacking/validiy-sensor wine
+
+WORKDIR /root/wine
+RUN ./configure \
+    --with-gnutls \
+    --without-hal \
+    --without-oss \
+    --without-x \
+    --without-freetype \
+    --disable-tests \
+    --enable-win64 \
+    --enable-maintainer-mode \
+    CFLAGS='-g -O2 -fdebug-prefix-map=/root/wine=. -fno-stack-protector -Wformat -Werror=format-security -Wno-error -fcommon' \
+    CPPFLAGS='-Wdate-time' \
+    CXXFLAGS='-g -O2 -fdebug-prefix-map=/root/wine=. -fno-stack-protector -Wformat -Werror=format-security' \
+    LDFLAGS='-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-rpath,/usr/lib/x86_64-linux-gnu/wine'
+
+RUN make -j$(nproc)
+RUN make DESTDIR=build install
+
+# Runtime container stage
+FROM debian:bullseye-slim
+
+COPY --from=builder /root/wine/build/ /
+COPY --from=builder /usr/lib/gcc/x86_64-w64-mingw32 /usr/lib/gcc/x86_64-w64-mingw32
+COPY --from=builder /usr/lib/x86_64-linux-gnu /usr/lib/x86_64-linux-gnu
+COPY --from=builder /lib /lib
+
+RUN sed -i 's|http://deb.debian.org/debian-security|http://archive.debian.org/debian-security|g' /etc/apt/sources.list && \
+    apt-get update && apt-get install -y --no-install-recommends \
+    libusb-1.0-0 \
+    libgnutls30 \
+    ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /root

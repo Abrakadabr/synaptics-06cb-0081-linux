@@ -1,0 +1,332 @@
+#!/usr/bin/env python3
+# /usr/local/bin/synaptics-bio-enroll
+# Enrollment utility for Synaptics 06cb:0081 Match-on-Chip sensor
+# Supports multi-user isolation with per-user identity tagging and multi-finger slots
+
+import os
+import sys
+import subprocess
+import time
+import re
+import json
+import pwd
+import struct
+
+def get_usb_dev_path():
+    try:
+        lsusb = subprocess.check_output(["lsusb"], text=True)
+    except Exception:
+        return None
+    for line in lsusb.splitlines():
+        if "06cb:0081" in line.lower() or ("synaptics" in line.lower() and "0081" in line.lower()):
+            m = re.search(r"Bus\s+(\d+)\s+Device\s+(\d+)", line)
+            if m:
+                return f"/dev/bus/usb/{m.group(1)}/{m.group(2)}"
+    return None
+
+def patch_enroll_binary(src_path, dst_path, target_user, target_uid, finger_id=1):
+    with open(src_path, "rb") as f:
+        data = bytearray(f.read())
+
+    # 1. Patch UID (RID) at 0x1413..0x1417
+    data[0x1413:0x1417] = struct.pack("<I", target_uid)
+
+    # 2. Patch SubFactor (finger slot: Slot 1 = 0xF5, Slot 2 = 0xF6, Slot 3 = 0xF7, ...)
+    # In enroll.exe, offset 0x143a..0x143e contains the SubFactor dword
+    subfactor = 0xF4 + finger_id
+    data[0x143a:0x143e] = struct.pack("<I", subfactor)
+
+    # 3. Patch Identity Name at 0x1447..0x1455
+    name_bytes = target_user.encode("utf-8")[:7] + b"\x00"
+    name_padded = name_bytes.ljust(8, b"\x00")
+    data[0x1447:0x144b] = struct.pack("<I", len(name_bytes))
+    data[0x144d:0x1455] = name_padded
+
+    # 4. Patch Sleep(3000) at 0x3eaa: ff d0 -> 90 90 (remove 3s delay before starting)
+    if data[0x3eaa:0x3eac] == b"\xff\xd0":
+        data[0x3eaa:0x3eac] = b"\x90\x90"
+
+    # 5. Patch jump over Sleep(10000) + identify() at 0x3ebd: 90 90 -> eb 41 (jump straight to cleanup & ret 0)
+    if data[0x3ebd:0x3ebf] == b"\x90\x90":
+        data[0x3ebd:0x3ebf] = b"\xeb\x41"
+
+    with open(dst_path, "wb") as f:
+        f.write(data)
+    os.chmod(dst_path, 0o755)
+
+def get_next_finger_id(opt_dir, target_user):
+    cfg_file = os.path.join(opt_dir, "identities.json")
+    if os.path.exists(cfg_file):
+        try:
+            with open(cfg_file, "r") as f:
+                data = json.load(f)
+            meta = data.get("_metadata", {}).get(target_user, {})
+            enrolled = meta.get("enrolled_fingers", [])
+            for fid in range(1, 11):
+                if fid not in enrolled:
+                    return fid
+        except Exception:
+            pass
+    return 1
+
+def update_identities_file(opt_dir, target_user, finger_id):
+    cfg_file = os.path.join(opt_dir, "identities.json")
+    data = {}
+    if os.path.exists(cfg_file):
+        try:
+            with open(cfg_file, "r") as f:
+                data = json.load(f)
+        except Exception:
+            data = {}
+
+    if target_user not in data:
+        data[target_user] = []
+    if target_user not in data[target_user]:
+        data[target_user].append(target_user)
+
+    if "_metadata" not in data:
+        data["_metadata"] = {}
+    if target_user not in data["_metadata"]:
+        data["_metadata"][target_user] = {"enrolled_fingers": []}
+    if finger_id not in data["_metadata"][target_user]["enrolled_fingers"]:
+        data["_metadata"][target_user]["enrolled_fingers"].append(finger_id)
+        data["_metadata"][target_user]["enrolled_fingers"].sort()
+
+    try:
+        with open(cfg_file, "w") as f:
+            json.dump(data, f, indent=4)
+            f.write("\n")
+        os.chmod(cfg_file, 0o666)
+    except Exception as e:
+        print(f"Warning: could not update {cfg_file}: {e}", file=sys.stderr)
+
+def main():
+    if os.geteuid() != 0:
+        print("Error: synaptics-bio-enroll must be run as root (use sudo).", file=sys.stderr)
+        sys.exit(1)
+
+    opt_dir = "/opt/synaptics-bio"
+    if not os.path.isdir(opt_dir):
+        opt_dir = "/home/alex/synaptics-bio-backup"
+
+    # Determine target user
+    target_user = None
+    if len(sys.argv) > 1 and not sys.argv[1].isdigit() and not sys.argv[1].startswith("-"):
+        target_user = sys.argv[1]
+    if not target_user:
+        target_user = os.environ.get("SUDO_USER")
+    if not target_user:
+        target_user = os.environ.get("USER")
+    if not target_user:
+        target_user = "alex"
+
+    try:
+        user_info = pwd.getpwnam(target_user)
+        target_uid = user_info.pw_uid
+    except KeyError:
+        print(f"Error: User '{target_user}' does not exist on this system.", file=sys.stderr)
+        print(f"Please create the user account first (e.g. sudo useradd {target_user}).", file=sys.stderr)
+        sys.exit(1)
+
+    # Determine finger slot (1-10)
+    finger_id = None
+    for arg in sys.argv[1:]:
+        if arg.isdigit():
+            val = int(arg)
+            if 1 <= val <= 10:
+                finger_id = val
+                break
+
+    if finger_id is None:
+        finger_id = get_next_finger_id(opt_dir, target_user)
+
+    base_enroll_exe = os.path.join(opt_dir, "enroll.exe")
+    if not os.path.exists(base_enroll_exe):
+        print(f"Error: {base_enroll_exe} not found.", file=sys.stderr)
+        sys.exit(1)
+
+    pid = os.getpid()
+    container_name = f"synaptics-bio-enroll-{pid}"
+    patched_exe_name = f"enroll-{target_user}-{pid}.exe"
+    patched_exe_path = os.path.join(opt_dir, patched_exe_name)
+    log_file = "/tmp/synaptics-bio-enroll.log"
+
+    # Sanitize environment
+    clean_env = os.environ.copy()
+    for var in ["XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "XDG_SESSION_ID", "XDG_DATA_DIRS"]:
+        clean_env.pop(var, None)
+    clean_env["HOME"] = "/root"
+    clean_env["PATH"] = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+    print("==========================================================")
+    print("   Synaptics Fingerprint Sensor Enrollment")
+    print("==========================================================")
+    print(f"Target User : {target_user} (UID: {target_uid})")
+    print(f"Finger Slot : #{finger_id} (Slot 1-10)")
+    print("")
+    print("Instructions:")
+    print("1. When prompted, place your finger centered on the sensor.")
+    print("2. When accepted, lift your finger and touch again.")
+    print("3. Repeat touches (approx. 8-10 times) until complete.")
+    print("==========================================================")
+    print("")
+
+    # 1. Clean up stale processes/containers
+    subprocess.run(["pkill", "-x", "identify.exe"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(["pkill", "-x", "enroll.exe"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(["podman", "rm", "-f", container_name], env=clean_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    # 2. Disable USB autosuspend
+    power_ctrl = "/sys/bus/usb/devices/1-5/power/control"
+    if os.path.exists(power_ctrl):
+        try:
+            with open(power_ctrl, "w") as f_pwr:
+                f_pwr.write("on\n")
+        except Exception:
+            pass
+
+    # 3. Reset USB device to ensure clean state
+    print("[Fingerprint] Initializing sensor hardware...", flush=True)
+    try:
+        subprocess.run(["usbreset", "06cb:0081"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
+    except Exception:
+        pass
+    time.sleep(1.5)
+
+    # 4. Locate USB device node dynamically
+    dev_path = get_usb_dev_path()
+    if not dev_path or not os.path.exists(dev_path):
+        print("Error: Synaptics 06cb:0081 sensor not found on USB.", file=sys.stderr)
+        sys.exit(1)
+
+    # 5. Patch enrollment binary with unique RID and Sub-ID
+    patch_enroll_binary(base_enroll_exe, patched_exe_path, target_user, target_uid, finger_id)
+
+    image_candidates = [
+        "localhost/wine:validity",
+        "wine:validity",
+        "ghcr.io/abrakadabr/synaptics-06cb-0081-linux:latest"
+    ]
+    image = "localhost/wine:validity"
+    for candidate in image_candidates:
+        try:
+            res = subprocess.run(["podman", "image", "exists", candidate], env=clean_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if res.returncode == 0:
+                image = candidate
+                break
+        except Exception:
+            pass
+
+    trace_file = f"usb-trace-{pid}.txt"
+    trace_path = os.path.join(opt_dir, trace_file)
+
+    cmd = [
+        "podman", "run", "--rm",
+        "--init",
+        "--name", container_name,
+        "--net=none",
+        "--security-opt", "label=disable",
+        "--device", dev_path,
+        "-v", "/dev/bus/usb:/dev/bus/usb",
+        "-e", "WINEPATH=/usr/lib/gcc/x86_64-w64-mingw32/10-win32;/usr/x86_64-w64-mingw32/lib",
+        "-e", "WINEDEBUG=fixme-all,err-all,trace+winusb",
+        "-w", opt_dir,
+        "-e", f"USB_SCRIPT={trace_file}",
+        "-v", f"{opt_dir}:{opt_dir}",
+        "-v", f"{opt_dir}/usb.txt:/root/.wine/drive_c/usb.txt",
+        image,
+        "sh", "-c", f"wine64 ./{patched_exe_name} enroll"
+    ]
+
+    proc = None
+    sample_count = 0
+    awaiting_touch = False
+    committed = False
+
+    with open(log_file, "a") as f_log:
+        f_log.write(f"\n--- Enrollment started at {time.ctime()} (User: {target_user}, UID: {target_uid}, Finger: #{finger_id}) ---\n")
+
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            env=clean_env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            errors="replace",
+            bufsize=1
+        )
+
+        for line in proc.stdout:
+            with open(log_file, "a") as f_log:
+                f_log.write(line)
+
+            # Detect sensor waiting for finger touch
+            if "about to IOCTL_BIOMETRIC_CAPTURE_DATA" in line:
+                sample_count += 1
+                awaiting_touch = True
+                print(f"[Fingerprint Enrollment] Touch sensor with finger to register (Sample #{sample_count}/6)...", flush=True)
+
+            # Detect successful sample update
+            elif "about to Update Enrollment" in line:
+                awaiting_touch = False
+                print(f"[Fingerprint Enrollment] Sample #{sample_count} accepted. Lift finger.", flush=True)
+
+            # Detect enrollment commitment to secure chip storage
+            elif "about to Commit Enrollment" in line:
+                awaiting_touch = False
+                print("\n[Fingerprint] All samples collected. Committing template to sensor...", flush=True)
+
+            elif "Got back 0x1 bytes:" in line:
+                committed = True
+
+        proc.wait()
+
+    except KeyboardInterrupt:
+        print("\n[Fingerprint] Enrollment canceled by user.", flush=True)
+    except Exception as e:
+        print(f"\n[Fingerprint] Error during enrollment: {e}", file=sys.stderr)
+    finally:
+        if proc and proc.poll() is None:
+            try:
+                proc.terminate()
+                proc.wait(timeout=2)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+        subprocess.run(["podman", "rm", "-f", container_name], env=clean_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if os.path.exists(patched_exe_path):
+            try:
+                os.remove(patched_exe_path)
+            except Exception:
+                pass
+        if os.path.exists(trace_path):
+            try:
+                os.remove(trace_path)
+            except Exception:
+                pass
+
+        # Reset USB device so sensor is clean and ready for PAM auth
+        try:
+            subprocess.run(["usbreset", "06cb:0081"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
+        except Exception:
+            pass
+
+    if committed:
+        update_identities_file(opt_dir, target_user, finger_id)
+        print("")
+        print("==========================================================")
+        print(f"Enrollment complete for user '{target_user}' (Finger #{finger_id})")
+        print("Biometric template committed to on-chip secure storage.")
+        print("You can verify immediately with:")
+        print("  sudo -k && sudo whoami")
+        print("==========================================================")
+        sys.exit(0)
+    else:
+        print("\n[Fingerprint] Enrollment was not completed.")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()
