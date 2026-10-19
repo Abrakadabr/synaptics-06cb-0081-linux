@@ -1,0 +1,8 @@
+# /etc/pam.d/polkit-1 integration snippet (KDE Polkit Authentication Dialogs)
+# Place at /etc/pam.d/polkit-1
+# Allows fingerprint authentication in KDE GUI password popups
+auth       sufficient   pam_exec.so quiet stdout /usr/local/bin/synaptics-bio-auth --compact
+auth       include      system-auth
+account    include      system-auth
+password   include      system-auth
+session    include      system-auth

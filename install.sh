@@ -163,6 +163,19 @@ if [ -f "${PAM_KDE}" ]; then
     fi
 fi
 
+PAM_POLKIT="/etc/pam.d/polkit-1"
+if [ ! -f "${PAM_POLKIT}" ]; then
+    cp "${SCRIPT_DIR}/pam/polkit-1.snippet" "${PAM_POLKIT}"
+    chmod 644 "${PAM_POLKIT}"
+    echo "Configured ${PAM_POLKIT} (KDE GUI authentication popups)."
+elif ! grep -q "synaptics-bio-auth" "${PAM_POLKIT}"; then
+    cp "${PAM_POLKIT}" "${PAM_POLKIT}.orig-bio"
+    sed -i '/auth[[:space:]]\+include[[:space:]]\+system-auth/i auth       sufficient   pam_exec.so quiet stdout /usr/local/bin/synaptics-bio-auth' "${PAM_POLKIT}"
+    echo "Configured ${PAM_POLKIT} (backup: ${PAM_POLKIT}.orig-bio)."
+else
+    echo "${PAM_POLKIT} is already configured."
+fi
+
 echo ""
 echo "=========================================================="
 echo "Installation complete!"

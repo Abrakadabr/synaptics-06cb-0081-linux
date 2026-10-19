@@ -50,7 +50,18 @@ password   include      password-auth
 session    include      password-auth
 ```
 
-### C. Display Managers (SDDM / GDM)
+### C. KDE GUI Password Popups / Polkit (`/etc/pam.d/polkit-1`)
+Place the rule in `/etc/pam.d/polkit-1` to authenticate GUI elevation dialogs (e.g. Partition Manager, Discover, `pkexec`):
+```pam
+#%PAM-1.0
+auth       sufficient   pam_exec.so quiet stdout /usr/local/bin/synaptics-bio-auth --compact
+auth       include      system-auth
+account    include      system-auth
+password   include      system-auth
+session    include      system-auth
+```
+
+### D. Display Managers (SDDM / GDM)
 For graphical login managers, add the same snippet to `/etc/pam.d/sddm` or `/etc/pam.d/gdm-password`.
 Note: Biometric login on fresh boot will authenticate the user, but does not unlock the user's GNOME Keyring or KDE KWallet (which require the cleartext user password).
 

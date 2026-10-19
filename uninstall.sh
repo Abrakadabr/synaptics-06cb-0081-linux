@@ -38,7 +38,19 @@ if [ -f "${PAM_KDE}" ]; then
     fi
 fi
 
-# 3. Remove Udev Rule
+# 3. Restore / Remove PAM Polkit-1
+PAM_POLKIT="/etc/pam.d/polkit-1"
+if [ -f "${PAM_POLKIT}" ]; then
+    if [ -f "${PAM_POLKIT}.orig-bio" ]; then
+        mv "${PAM_POLKIT}.orig-bio" "${PAM_POLKIT}"
+        echo "Restored ${PAM_POLKIT} from original backup."
+    else
+        rm -f "${PAM_POLKIT}"
+        echo "Removed custom ${PAM_POLKIT}."
+    fi
+fi
+
+# 4. Remove Udev Rule
 if [ -f "/etc/udev/rules.d/70-synaptics-bio.rules" ]; then
     rm -f "/etc/udev/rules.d/70-synaptics-bio.rules"
     udevadm control --reload-rules

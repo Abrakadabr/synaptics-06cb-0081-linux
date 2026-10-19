@@ -74,10 +74,13 @@ def main():
     pid = os.getpid()
     container_name = f"synaptics-bio-auth-{pid}"
 
-    # Determine target user being authenticated
+    # Determine target user and display mode
+    compact_mode = "--compact" in sys.argv
+    cli_args = [arg for arg in sys.argv[1:] if not arg.startswith("-")]
+
     target_user = None
-    if len(sys.argv) > 1 and not sys.argv[1].startswith("-"):
-        target_user = sys.argv[1]
+    if cli_args:
+        target_user = cli_args[0]
     if not target_user:
         target_user = os.environ.get("PAM_USER")
     if not target_user:
@@ -146,7 +149,10 @@ def main():
         f_log.write(f"Target User: {target_user} (Allowed Identities: {sorted(list(allowed_identities))})\n")
         f_log.write(f"UID={os.getuid()} EUID={os.geteuid()}\n")
 
-    print(f"[Fingerprint] Sensor initializing for {target_user} (~3s)...", flush=True)
+    if compact_mode:
+        print(f"[Fingerprint] Sensor initializing for {target_user}...", flush=True)
+    else:
+        print(f"[Fingerprint] Sensor initializing for {target_user} (~3s)...", flush=True)
 
     # 1. Clean up any stale wine/identify processes or lingering containers
     subprocess.run(["pkill", "-x", "identify.exe"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -250,7 +256,10 @@ def main():
                 # Sensor is armed and actively waiting for finger touch
                 if not ready_announced and ("about to IOCTL_BIOMETRIC_CAPTURE_DATA" in line or "PipeID=131" in line or "libusb_interrupt_transfer=-7!" in line):
                     ready_announced = True
-                    print(f"\n[Fingerprint Auth] >>> Place enrolled finger to authenticate as '{target_user}' <<<", flush=True)
+                    if compact_mode:
+                        print(f"[Fingerprint] Touch sensor to authenticate as '{target_user}'", flush=True)
+                    else:
+                        print(f"\n[Fingerprint Auth] >>> Place enrolled finger to authenticate as '{target_user}' <<<", flush=True)
 
                 # Polling loop entered (-7! indicates sensor is actively awaiting finger touch on pipe 131)
                 if ready_announced and "libusb_interrupt_transfer=-7!" in line:
@@ -259,7 +268,10 @@ def main():
                 # Physical contact detected: either transfer=0! after entering polling loop, or capture data arrived (sz=80)
                 if ready_announced and not contact_detected and ("sz=80" in line or (polling_armed and "libusb_interrupt_transfer=0!" in line)):
                     contact_detected = True
-                    print("[Fingerprint] Contact detected, scanning...", flush=True)
+                    if compact_mode:
+                        print(f"[Fingerprint] Contact detected, scanning...", flush=True)
+                    else:
+                        print("[Fingerprint] Contact detected, scanning...", flush=True)
 
                 # Check for on-chip template match
                 matched_id = extract_matched_identity(line, all_identities)
@@ -274,7 +286,10 @@ def main():
                 # If no match occurred from on-chip comparison
                 if "1f800980" in line or "WINBIO_E_NO_MATCH" in line:
                     contact_detected = False
-                    print("[Fingerprint] Not recognized. Adjust finger and try again...", flush=True)
+                    if compact_mode:
+                        print(f"[Fingerprint] Not recognized. Adjust finger and try again...", flush=True)
+                    else:
+                        print("[Fingerprint] Not recognized. Adjust finger and try again...", flush=True)
 
         if proc and proc.poll() is None:
             proc.terminate()
@@ -303,7 +318,10 @@ def main():
             f_log.write(f"Result: SUCCESS (Target: {target_user}, Matched identity: {matched_identity})\n")
         sys.exit(0)
     elif wrong_user_match:
-        print(f"\n[Fingerprint] Scanned finger belongs to '{wrong_user_match}', not '{target_user}'.", flush=True)
+        if compact_mode:
+            print(f"[Fingerprint] Scanned finger belongs to '{wrong_user_match}', not '{target_user}'.", flush=True)
+        else:
+            print(f"\n[Fingerprint] Scanned finger belongs to '{wrong_user_match}', not '{target_user}'.", flush=True)
         with open(log_file, "a") as f_log:
             f_log.write(f"Result: DENIED (Target: {target_user}, but matched: {wrong_user_match})\n")
         sys.exit(1)

@@ -178,6 +178,12 @@ root
 
 If you do not touch the sensor or cancel, authentication falls back to your regular Linux password automatically.
 
+### Test KDE GUI Elevation (Polkit Popup)
+```bash
+pkexec whoami
+```
+The native KDE Plasma elevation popup will appear. Touch the sensor to authenticate and the dialog will automatically validate and close as `root`.
+
 ---
 
 ## Multi-User Configuration (`identities.json`)
