@@ -83,6 +83,7 @@ def main():
             pass
 
     # Determine target user and display mode
+    lockscreen_mode = "--lockscreen" in sys.argv
     compact_mode = "--compact" in sys.argv
     quiet_mode = "--quiet" in sys.argv
     cli_args = [arg for arg in sys.argv[1:] if not arg.startswith("-")]
@@ -157,7 +158,7 @@ def main():
     write_log(f"Target User: {target_user} (Allowed Identities: {sorted(list(allowed_identities))})\n")
     write_log(f"UID={os.getuid()} EUID={os.geteuid()}\n")
 
-    if not quiet_mode:
+    if not quiet_mode and not lockscreen_mode:
         if compact_mode:
             print(f"[Fingerprint] Sensor initializing for {target_user}...", flush=True)
         else:
@@ -263,7 +264,9 @@ def main():
                 if not ready_announced and ("about to IOCTL_BIOMETRIC_CAPTURE_DATA" in line or "PipeID=131" in line or "libusb_interrupt_transfer=-7!" in line):
                     ready_announced = True
                     if not quiet_mode:
-                        if compact_mode:
+                        if lockscreen_mode:
+                            print(f"(Touch fingerprint sensor to authenticate as '{target_user}')", flush=True)
+                        elif compact_mode:
                             print(f"[Fingerprint] Touch sensor to authenticate as '{target_user}'", flush=True)
                         else:
                             print(f"\n[Fingerprint Auth] >>> Place enrolled finger to authenticate as '{target_user}' <<<", flush=True)
@@ -275,7 +278,7 @@ def main():
                 # Physical contact detected: either transfer=0! after entering polling loop, or capture data arrived (sz=80)
                 if ready_announced and not contact_detected and ("sz=80" in line or (polling_armed and "libusb_interrupt_transfer=0!" in line)):
                     contact_detected = True
-                    if not quiet_mode:
+                    if not quiet_mode and not lockscreen_mode:
                         if compact_mode:
                             print(f"[Fingerprint] Contact detected, scanning...", flush=True)
                         else:
@@ -295,7 +298,9 @@ def main():
                 if "1f800980" in line or "WINBIO_E_NO_MATCH" in line:
                     contact_detected = False
                     if not quiet_mode:
-                        if compact_mode:
+                        if lockscreen_mode:
+                            print(f"Fingerprint not recognized. Adjust finger or use password.", flush=True)
+                        elif compact_mode:
                             print(f"[Fingerprint] Not recognized. Adjust finger and try again...", flush=True)
                         else:
                             print("[Fingerprint] Not recognized. Adjust finger and try again...", flush=True)

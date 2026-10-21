@@ -38,10 +38,10 @@ session    include      system-auth
 ```
 
 ### B. KDE Plasma Lock Screen (`/etc/pam.d/kde`)
-Place the rule right before `password-auth` (use `--quiet` so KDE Plasma's lock screen uses its built-in fingerprint UI tips rather than accumulating multi-line stdout messages):
+Place the rule right before `password-auth` (use `--lockscreen` to present a single clean prompt when the sensor is armed, avoiding startup noise or multi-line stacking):
 ```pam
 #%PAM-1.0
-auth       sufficient   pam_exec.so quiet stdout /usr/local/bin/synaptics-bio-auth --quiet
+auth       sufficient   pam_exec.so quiet stdout /usr/local/bin/synaptics-bio-auth --lockscreen
 auth       substack     password-auth
 auth       optional     pam_kwallet5.so
 auth       optional     pam_kwallet.so
