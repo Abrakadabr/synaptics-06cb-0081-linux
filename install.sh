@@ -156,9 +156,10 @@ PAM_KDE="/etc/pam.d/kde"
 if [ -f "${PAM_KDE}" ]; then
     if ! grep -q "synaptics-bio-auth" "${PAM_KDE}"; then
         cp "${PAM_KDE}" "${PAM_KDE}.orig-bio"
-        sed -i '/auth[[:space:]]\+substack[[:space:]]\+password-auth/i auth       sufficient   pam_exec.so quiet stdout /usr/local/bin/synaptics-bio-auth' "${PAM_KDE}"
+        sed -i '/auth[[:space:]]\+substack[[:space:]]\+password-auth/i auth       sufficient   pam_exec.so quiet stdout /usr/local/bin/synaptics-bio-auth --quiet' "${PAM_KDE}"
         echo "Configured ${PAM_KDE} (backup: ${PAM_KDE}.orig-bio)."
     else
+        sed -i 's|/usr/local/bin/synaptics-bio-auth$|/usr/local/bin/synaptics-bio-auth --quiet|' "${PAM_KDE}"
         echo "${PAM_KDE} is already configured."
     fi
 fi

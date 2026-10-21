@@ -1,3 +1,4 @@
 # /etc/pam.d/kde integration snippet (KDE Plasma Lock Screen)
 # Insert before "auth substack password-auth"
-auth       sufficient   pam_exec.so quiet stdout /usr/local/bin/synaptics-bio-auth
+auth       sufficient   pam_exec.so quiet stdout /usr/local/bin/synaptics-bio-auth --quiet
+
