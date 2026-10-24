@@ -11,6 +11,38 @@ import re
 import json
 import pwd
 import struct
+import glob
+import fcntl
+
+def acquire_hardware_lock():
+    lock_path = "/run/lock/synaptics-bio.lock"
+    try:
+        os.makedirs("/run/lock", exist_ok=True)
+    except Exception:
+        pass
+    try:
+        fd = open(lock_path, "a+")
+        try:
+            os.chmod(lock_path, 0o666)
+        except Exception:
+            pass
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return fd
+    except (BlockingIOError, OSError):
+        return None
+
+def ensure_usb_powered():
+    for p in glob.glob("/sys/bus/usb/devices/*"):
+        try:
+            with open(os.path.join(p, "idVendor")) as fv, open(os.path.join(p, "idProduct")) as fp:
+                if fv.read().strip() == "06cb" and fp.read().strip() == "0081":
+                    ctrl = os.path.join(p, "power", "control")
+                    if os.path.exists(ctrl):
+                        with open(ctrl, "w") as fc:
+                            fc.write("on\n")
+                    return
+        except (OSError, IOError):
+            continue
 
 def get_usb_dev_path():
     try:
@@ -152,7 +184,7 @@ def update_identities_after_delete(opt_dir, target_user, finger_id=None):
         with open(cfg_file, "w") as f:
             json.dump(data, f, indent=4)
             f.write("\n")
-        os.chmod(cfg_file, 0o666)
+        os.chmod(cfg_file, 0o644)
     except Exception as e:
         print(f"Warning: could not update {cfg_file}: {e}", file=sys.stderr)
 
@@ -188,7 +220,12 @@ def main():
 
     opt_dir = "/opt/synaptics-bio"
     if not os.path.isdir(opt_dir):
-        opt_dir = "/home/alex/synaptics-bio-backup"
+        repo_opt = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "opt")
+        if os.path.isdir(repo_opt):
+            opt_dir = repo_opt
+        else:
+            print("Error: /opt/synaptics-bio directory not found.", file=sys.stderr)
+            sys.exit(1)
 
     if "-l" in args or "--list" in args:
         list_enrolled_profiles(opt_dir)
@@ -197,6 +234,12 @@ def main():
     if os.geteuid() != 0:
         print("Error: Fingerprint deletion requires root privileges (use sudo).", file=sys.stderr)
         print("Example: sudo synaptics-bio-delete kate 2", file=sys.stderr)
+        sys.exit(1)
+
+    # Acquire hardware mutex lock
+    lock_fd = acquire_hardware_lock()
+    if not lock_fd:
+        print("Error: Another biometric process is currently accessing the sensor. Please wait and try again.", file=sys.stderr)
         sys.exit(1)
 
     force = False
@@ -323,14 +366,8 @@ def main():
     subprocess.run(["pkill", "-x", "enroll.exe"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     subprocess.run(["podman", "rm", "-f", container_name], env=clean_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-    # 2. Disable USB autosuspend
-    power_ctrl = "/sys/bus/usb/devices/1-5/power/control"
-    if os.path.exists(power_ctrl):
-        try:
-            with open(power_ctrl, "w") as f_pwr:
-                f_pwr.write("on\n")
-        except Exception:
-            pass
+    # 2. Disable USB autosuspend dynamically across sysfs
+    ensure_usb_powered()
 
     # 3. Reset USB device to ensure clean state
     print("[Fingerprint] Initializing sensor hardware...", flush=True)
@@ -340,13 +377,7 @@ def main():
         pass
     time.sleep(1.5)
 
-    # 4. Locate USB device node dynamically
-    dev_path = get_usb_dev_path()
-    if not dev_path or not os.path.exists(dev_path):
-        print("Error: Synaptics 06cb:0081 sensor not found on USB.", file=sys.stderr)
-        sys.exit(1)
-
-    # 5. Determine UIDs to purge on-chip
+    # 4. Determine UIDs to purge on-chip
     uids_to_purge = [target_uid]
     if target_user == "alex" and (is_all or finger_id == 2):
         if 1261 not in uids_to_purge:
@@ -371,6 +402,16 @@ def main():
     deleted = False
 
     for current_uid in uids_to_purge:
+        # Dynamically locate USB device node per-iteration after any potential usbreset re-enumeration
+        time.sleep(1.5)
+        dev_path = get_usb_dev_path()
+        if not dev_path or not os.path.exists(dev_path):
+            time.sleep(1.0)
+            dev_path = get_usb_dev_path()
+        if not dev_path or not os.path.exists(dev_path):
+            print("Error: Synaptics 06cb:0081 sensor not found on USB.", file=sys.stderr)
+            break
+
         patch_delete_binary(base_enroll_exe, patched_exe_path, current_uid, None if is_all else finger_id)
 
         cmd = [

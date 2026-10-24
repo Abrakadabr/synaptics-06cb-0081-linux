@@ -1,3 +1,4 @@
 # /etc/udev/rules.d/70-synaptics-bio.rules
-# Synaptics / Validity 06cb:0081 fingerprint sensor userland access and autosuspend management
-SUBSYSTEM=="usb", ATTRS{idVendor}=="06cb", ATTRS{idProduct}=="0081", MODE="0666", TEST=="power/control", ATTR{power/control}="on"
+# Synaptics / Validity 06cb:0081 fingerprint sensor access and autosuspend management
+# Restrict character device to root:root (0660) to protect raw biometric capture data
+SUBSYSTEM=="usb", ATTRS{idVendor}=="06cb", ATTRS{idProduct}=="0081", MODE="0660", GROUP="root", TEST=="power/control", ATTR{power/control}="on"

@@ -73,8 +73,8 @@ fi
 if [ ! -f "${OPT_DIR}/CalibrationData.blob" ]; then
     if [ -f "${SCRIPT_DIR}/CalibrationData.blob" ]; then
         cp -p "${SCRIPT_DIR}/CalibrationData.blob" "${OPT_DIR}/CalibrationData.blob"
-    elif [ -f "/home/alex/synaptics-bio-backup/CalibrationData.blob" ]; then
-        cp -p "/home/alex/synaptics-bio-backup/CalibrationData.blob" "${OPT_DIR}/CalibrationData.blob"
+    elif [ -f "${SCRIPT_DIR}/data/CalibrationData.blob" ]; then
+        cp -p "${SCRIPT_DIR}/data/CalibrationData.blob" "${OPT_DIR}/CalibrationData.blob"
     fi
 fi
 
@@ -87,11 +87,12 @@ else
     echo "Driver DLLs verified in ${OPT_DIR}."
 fi
 
+# Secure administrative ownership and permissions
 chown -R root:root "${OPT_DIR}"
-chmod 777 "${OPT_DIR}"
-chmod 666 "${OPT_DIR}/usb.txt" "${OPT_DIR}/.env" 2>/dev/null || true
-[ -f "${OPT_DIR}/identities.json" ] && chmod 666 "${OPT_DIR}/identities.json"
-[ -f "${OPT_DIR}/CalibrationData.blob" ] && chmod 666 "${OPT_DIR}/CalibrationData.blob"
+chmod 755 "${OPT_DIR}"
+chmod 644 "${OPT_DIR}/usb.txt" "${OPT_DIR}/.env" 2>/dev/null || true
+[ -f "${OPT_DIR}/identities.json" ] && chmod 644 "${OPT_DIR}/identities.json"
+[ -f "${OPT_DIR}/CalibrationData.blob" ] && chmod 644 "${OPT_DIR}/CalibrationData.blob"
 chmod 755 "${OPT_DIR}"/*.dll "${OPT_DIR}"/*.exe 2>/dev/null || true
 
 # 5. Container Image Setup
@@ -108,10 +109,6 @@ if [ "$IMAGE_READY" = false ]; then
     if [ -f "${SCRIPT_DIR}/wine-validity.tar.zst" ]; then
         echo "Loading ${SCRIPT_DIR}/wine-validity.tar.zst into Podman storage..."
         zstdcat "${SCRIPT_DIR}/wine-validity.tar.zst" | podman load
-        IMAGE_READY=true
-    elif [ -f "/home/alex/synaptics-bio-backup/wine-validity.tar.zst" ]; then
-        echo "Loading backup archive into Podman storage..."
-        zstdcat "/home/alex/synaptics-bio-backup/wine-validity.tar.zst" | podman load
         IMAGE_READY=true
     else
         echo "Attempting to pull pre-built container from GitHub Container Registry (${GHCR_IMAGE})..."
@@ -130,6 +127,7 @@ fi
 
 # 6. Install Udev Rule and CLI Tools
 echo "[6/7] Installing Udev rules and CLI tools..."
+rm -f /etc/udev/rules.d/99-synaptics-fingerprint.rules
 cp "${SCRIPT_DIR}/udev/70-synaptics-bio.rules" /etc/udev/rules.d/70-synaptics-bio.rules
 udevadm control --reload-rules
 udevadm trigger

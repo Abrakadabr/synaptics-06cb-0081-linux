@@ -9,6 +9,47 @@ import subprocess
 import time
 import re
 import json
+import glob
+import fcntl
+import pwd
+
+def acquire_hardware_lock():
+    """
+    Non-blocking flock on /run/lock/synaptics-bio.lock to prevent concurrent
+    hardware access collisions between multiple PAM / CLI callers.
+    """
+    lock_path = "/run/lock/synaptics-bio.lock"
+    try:
+        os.makedirs("/run/lock", exist_ok=True)
+    except Exception:
+        pass
+    try:
+        fd = open(lock_path, "a+")
+        try:
+            os.chmod(lock_path, 0o666)
+        except Exception:
+            pass
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return fd
+    except (BlockingIOError, OSError):
+        return None
+
+def ensure_usb_powered():
+    """
+    Dynamically discover the 06cb:0081 USB device path in sysfs and ensure
+    autosuspend is disabled ('on').
+    """
+    for p in glob.glob("/sys/bus/usb/devices/*"):
+        try:
+            with open(os.path.join(p, "idVendor")) as fv, open(os.path.join(p, "idProduct")) as fp:
+                if fv.read().strip() == "06cb" and fp.read().strip() == "0081":
+                    ctrl = os.path.join(p, "power", "control")
+                    if os.path.exists(ctrl):
+                        with open(ctrl, "w") as fc:
+                            fc.write("on\n")
+                    return
+        except (OSError, IOError):
+            continue
 
 def get_usb_dev_path():
     try:
@@ -67,11 +108,33 @@ def extract_matched_identity(line, all_identities=None):
     return None
 
 def main():
-    if os.path.exists("/tmp/disable-bio-auth"):
+    # Check for bypass flag in root-controlled /run or /etc, or user-specific runtime dir
+    if os.path.exists("/run/synaptics-bio/disable-bio-auth") or os.path.exists("/etc/synaptics-bio/disable-bio-auth"):
+        sys.exit(1)
+
+    # Acquire hardware mutex lock to prevent concurrent sensor access collisions
+    lock_fd = acquire_hardware_lock()
+    if not lock_fd:
+        # Another process holds the sensor lock; immediately fallback to password
         sys.exit(1)
 
     uid = os.geteuid()
-    log_file = f"/tmp/synaptics-bio-auth-{uid}.log"
+    if uid == 0:
+        log_file = "/var/log/synaptics-bio-auth.log"
+        if not os.path.exists(log_file):
+            try:
+                with open(log_file, "a") as f:
+                    pass
+                os.chmod(log_file, 0o600)
+            except Exception:
+                log_file = "/tmp/synaptics-bio-auth-0.log"
+    else:
+        user_run = f"/run/user/{uid}"
+        if os.path.isdir(user_run):
+            log_file = os.path.join(user_run, "synaptics-bio-auth.log")
+        else:
+            log_file = f"/tmp/synaptics-bio-auth-{uid}.log"
+
     pid = os.getpid()
     container_name = f"synaptics-bio-auth-{pid}"
 
@@ -98,6 +161,14 @@ def main():
     if not target_user:
         target_user = os.environ.get("USER") or "alex"
 
+    # Check for user-specific bypass flag
+    try:
+        target_pw = pwd.getpwnam(target_user)
+        if os.path.exists(f"/run/user/{target_pw.pw_uid}/disable-bio-auth"):
+            sys.exit(1)
+    except Exception:
+        pass
+
     # Load configured allowed biometric identities for this user
     config_file = "/opt/synaptics-bio/identities.json"
     if not os.path.exists(config_file):
@@ -105,6 +176,12 @@ def main():
 
     allowed_identities = {target_user}
     all_identities = {target_user, "Unicorn", "alex", "kate"}
+
+    # Handle on-chip 7-character username truncation
+    if len(target_user) > 7:
+        allowed_identities.add(target_user[:7])
+        all_identities.add(target_user[:7])
+
     if os.path.exists(config_file):
         try:
             with open(config_file, "r") as f_cfg:
@@ -113,12 +190,18 @@ def main():
                 if u.startswith("_"):
                     continue
                 all_identities.add(u)
+                if len(u) > 7:
+                    all_identities.add(u[:7])
                 if isinstance(aliases, list):
                     for a in aliases:
                         all_identities.add(a)
+                        if len(a) > 7:
+                            all_identities.add(a[:7])
             if target_user in ident_map and isinstance(ident_map[target_user], list):
                 for alias in ident_map[target_user]:
                     allowed_identities.add(alias)
+                    if len(alias) > 7:
+                        allowed_identities.add(alias[:7])
         except Exception:
             pass
 
@@ -144,7 +227,7 @@ def main():
     os.environ["HOME"] = clean_env["HOME"]
     os.environ["PATH"] = clean_env["PATH"]
 
-    # Rotate log if larger than 1MB to prevent tmpfs memory consumption
+    # Rotate log if larger than 1MB to prevent disk memory consumption
     try:
         if os.path.exists(log_file) and os.path.getsize(log_file) > 1024 * 1024:
             with open(log_file, "r") as f_prev:
@@ -168,14 +251,8 @@ def main():
     subprocess.run(["pkill", "-x", "identify.exe"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     subprocess.run(["podman", "rm", "-f", container_name], env=clean_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-    # 2. Ensure USB device is awake (disable autosuspend if it was suspended during sleep)
-    power_ctrl = "/sys/bus/usb/devices/1-5/power/control"
-    if os.path.exists(power_ctrl):
-        try:
-            with open(power_ctrl, "w") as f_pwr:
-                f_pwr.write("on\n")
-        except Exception:
-            pass
+    # 2. Ensure USB device is awake (dynamically scan sysfs and disable autosuspend)
+    ensure_usb_powered()
 
     # 3. Reset USB device to ensure cryptoprocessor starts in State 0
     try:
@@ -192,7 +269,12 @@ def main():
 
     opt_dir = "/opt/synaptics-bio"
     if not os.path.isdir(opt_dir):
-        opt_dir = "/home/alex/synaptics-bio-backup"
+        repo_opt = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "opt")
+        if os.path.isdir(repo_opt):
+            opt_dir = repo_opt
+        else:
+            write_log("Error: /opt/synaptics-bio directory not found\n")
+            sys.exit(1)
 
     image_candidates = [
         "localhost/wine:validity",
