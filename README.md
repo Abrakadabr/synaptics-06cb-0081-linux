@@ -11,12 +11,15 @@ Turnkey Linux biometric authentication and enrollment solution for the proprieta
 
 ## Highlights
 
-- ⚡ **Fast & Responsive:** Verification completes in **~2.5 seconds** (initialization sleeps eliminated).
-- ⚠️ **Dual-Boot / Pairing Notice:** Enrolling fingers under Linux establishes host pairing in the sensor's internal flash memory. This overwrites previous Windows Hello enrollments, which will need to be re-enrolled if returning to Windows.
 - 👥 **Multi-User Isolation:** Enrolls and tags prints per Linux account (using Windows SID RIDs) with multi-finger slots (1–10). Cross-user authentication attempts are strictly rejected.
 - 🛡️ **Zero-Crash UMDF Emulation:** Includes a binary patch for Lenovo driver v5.5.2731.1050 that eliminates NULL pointer adapter crashes under Wine.
-- 🪟 **PAM Integration:** Out-of-the-box support for `sudo` CLI authentication and **KDE Plasma 6 Wayland** lock screen unlock, with instant, automatic fallback to password authentication.
+- 🪟 **PAM & Polkit Integration:** Out-of-the-box support for `sudo` CLI authentication, Polkit GUI elevation dialogs, and **KDE Plasma 6 Wayland** lock screen unlock, with instant, automatic fallback to password authentication.
+- 🔄 **On-Demand Runtime:** Verification runs in an isolated container only when triggered; zero persistent background daemons consuming CPU, memory, or battery.
 - ⚖️ **100% Legally Compliant:** Zero proprietary vendor DLLs are distributed in this repository. Drivers are fetched directly from Lenovo OEM servers and patched locally.
+
+> [!WARNING]
+> ### Dual-Boot & Windows Hello Notice
+> Enrolling fingers under Linux establishes cryptographic host pairing within the sensor's internal flash memory. This pairing overwrites existing Windows Hello enrollments, which will need to be re-enrolled if returning to Windows.
 
 ---
 
@@ -35,7 +38,7 @@ Confirmed working on laptops equipped with the Synaptics WBDI USB ID `06cb:0081`
 +-----------------------------------------------------------------------------------+
 | Linux Userland                                                                    |
 |                                                                                   |
-|  [ sudo / KDE lock screen ] ---> PAM (/etc/pam.d/sudo, /etc/pam.d/kde)            |
+|  [ sudo / KDE lock screen / Polkit ] ---> PAM (/etc/pam.d/sudo, /etc/pam.d/kde)   |
 |                                            |                                      |
 |                                      pam_exec.so                                  |
 |                                            v                                      |
@@ -83,12 +86,13 @@ sudo bash install.sh
 ```
 
 The installer will automatically:
-1. Verify `06cb:0081` hardware presence.
-2. Download the official Lenovo driver (`huy103af07m6.exe`), extract required DLLs, and apply the Wine UMDF crash patch.
-3. Pull or load the Wine UMDF runtime container image.
-4. Install udev permissions (`/etc/udev/rules.d/70-synaptics-bio.rules`) and disable USB autosuspend.
-5. Install CLI helper tools to `/usr/local/bin/`.
-6. Configure PAM for `sudo` and KDE lock screen (with automatic backups).
+1. Verify `06cb:0081` hardware presence via `lsusb`.
+2. Check and install system prerequisites (`podman`, `python3`, `usbutils`, `zstd`) across Fedora, Ubuntu, Debian, or Arch Linux.
+3. Set up `/opt/synaptics-bio` structure and secure configuration permissions (`0755` directory, `0644` configs).
+4. Download the official Lenovo OEM driver (`huy103af07m6.exe`), extract required DLLs, verify SHA-256 checksums, and apply the Wine UMDF crash patch.
+5. Configure shared multi-user static container storage in `/usr/share/containers/storage` (`localhost/wine:validity`).
+6. Install udev permissions (`/etc/udev/rules.d/70-synaptics-bio.rules`), CLI helper tools to `/usr/local/bin/`, systemd-tmpfiles rule (`/etc/tmpfiles.d/synaptics-bio.conf`), and sleep/resume hooks.
+7. Configure PAM authentication stack for `sudo`, KDE Plasma lock screen, and Polkit (`/etc/pam.d/polkit-1`) with automatic `.orig-bio` backups, and apply KDE lockscreen UI responsiveness enhancements if detected.
 
 ---
 
@@ -130,7 +134,7 @@ Example output:
 ==========================================================
 User: alex (UID: 1000)
   Enrolled finger slots : #1
-  Hardware SID labels   : alex, Unicorn
+  Hardware SID labels   : alex
 ----------------------------------------------------------
 User: kate (UID: 1001)
   Enrolled finger slots : #1, #2
@@ -193,8 +197,7 @@ User authorizations and enrolled finger slots are defined in `/opt/synaptics-bio
 ```json
 {
     "alex": [
-        "alex",
-        "Unicorn"
+        "alex"
     ],
     "kate": [
         "kate"
@@ -269,7 +272,7 @@ To restore your system completely to its original state:
 ```bash
 sudo bash uninstall.sh
 ```
-This restores original PAM files from `.orig-bio` backups, removes udev rules, and deletes helper scripts.
+This restores original PAM files from `.orig-bio` backups, removes udev rules, systemd-tmpfiles rules, sleep hooks, and CLI tools, reverts KDE lockscreen QML modifications, and backs up `/opt/synaptics-bio` keys and calibration data to `/opt/synaptics-bio.backup`.
 
 ---
 
