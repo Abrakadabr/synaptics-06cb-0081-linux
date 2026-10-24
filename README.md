@@ -192,28 +192,50 @@ The native KDE Plasma elevation popup will appear. Touch the sensor to authentic
 
 ## Multi-User Configuration (`identities.json`)
 
-User authorizations and enrolled finger slots are defined in `/opt/synaptics-bio/identities.json`:
+User authorizations, on-chip identity mappings, and enrolled finger slots are defined in `/opt/synaptics-bio/identities.json`:
 
 ```json
 {
     "alex": [
         "alex"
     ],
-    "kate": [
-        "kate"
+    "alexander": [
+        "alexand"
     ],
     "_metadata": {
         "alex": { "enrolled_fingers": [1, 2] },
-        "kate": { "enrolled_fingers": [1, 2] }
+        "alexander": { "enrolled_fingers": [1] }
     }
 }
 ```
 
-- Each Linux user maps to one or more allowed on-chip identity labels.
-- If a user attempts to authenticate while another user's enrolled finger is touched, access is immediately rejected:
-  ```text
-  [Fingerprint] Scanned finger belongs to 'kate', not 'alex'.
-  ```
+### Understanding Identity Mappings (`"<user>": ["<label>", ...]`)
+
+While standard configurations like `"alex": ["alex"]` may look redundant at first glance, the mapping bridges Linux PAM accounts with on-chip hardware records:
+
+| Component | Description | Example |
+| :--- | :--- | :--- |
+| **JSON Key** (`"alexander"`) | The **Linux login username** requesting authentication via PAM (`sudo`, KDE lock screen, login). | `"alexander"`, `"kate"`, `"root"` |
+| **Array Value** (`["alexand"]`) | The **hardware identity label(s)** stored inside the sensor's NVRAM that are authorized to unlock this account. | `["alexand"]`, `["alex", "admin"]` |
+
+#### Why Hardware Labels Differ From Linux Usernames:
+1. **7-Character Hardware Truncation:**
+   The sensor's Match-on-Chip firmware and Windows Biometric Framework packet format allocate space for only a 7-character string (plus null terminator) in the on-chip identity struct. Usernames longer than 7 characters (e.g. `alexander` or `christopher`) are stored on-chip as `alexand` or `christo`. The mapping routes the truncated hardware tag back to the full Linux account.
+2. **Shared Accounts & Administrative Roles:**
+   Multiple individual users can be authorized to authenticate a single shared account or role (e.g., `"root": ["alex", "sysadmin"]`).
+3. **Multiple Profiles & Aliases:**
+   Users with fingerprints enrolled across different labels or systems can map multiple valid identifiers to their account.
+4. **Slot Tracking (`_metadata`):**
+   The `_metadata` dictionary tracks which numbered finger slots (1–10) are active per user so `synaptics-bio-enroll` can automatically select the next free slot and `synaptics-bio-delete` knows which slots exist to delete.
+
+> [!TIP]
+> **Automatic Management:** You do not need to edit `identities.json` manually. The helper commands `synaptics-bio-enroll` and `synaptics-bio-delete` automatically manage, update, and clean up these mappings and metadata.
+
+### Strict User Isolation
+If a user attempts to authenticate while another user's enrolled finger is touched, access is immediately rejected:
+```text
+[Fingerprint] Scanned finger belongs to 'kate', not 'alex'.
+```
 
 ### Static System Image Store (`/usr/share/containers/storage`)
 
