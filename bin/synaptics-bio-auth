@@ -12,27 +12,154 @@ import json
 import glob
 import fcntl
 import pwd
+import signal
+import select
+import atexit
 
-def acquire_hardware_lock():
+LOCK_PATH = "/run/lock/synaptics-bio.lock"
+META_PATH = "/run/lock/synaptics-bio.meta"
+
+def is_screen_locked(uid=None):
     """
-    Non-blocking flock on /run/lock/synaptics-bio.lock to prevent concurrent
+    Check if the desktop session is currently locked via kscreenlocker or loginctl.
+    """
+    try:
+        res = subprocess.run(["pgrep", "-x", "kscreenlocker_g"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if res.returncode == 0:
+            return True
+    except Exception:
+        pass
+
+    try:
+        if uid is None:
+            uid = os.geteuid()
+        cmd = ["loginctl", "show-user", str(uid), "-p", "Display", "--value"]
+        display_session = subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL).strip()
+        if display_session:
+            cmd = ["loginctl", "show-session", display_session, "-p", "LockedHint", "--value"]
+            locked = subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL).strip()
+            if locked == "yes":
+                return True
+    except Exception:
+        pass
+
+    return False
+
+def get_proc_ppid(pid):
+    try:
+        with open(f"/proc/{pid}/stat", "r") as f:
+            return int(f.read().split()[3])
+    except Exception:
+        return None
+
+def acquire_hardware_lock(mode="interactive", timeout=2.5):
+    """
+    Acquires an exclusive flock on /run/lock/synaptics-bio.lock to prevent concurrent
     hardware access collisions between multiple PAM / CLI callers.
+    Preempts orphaned lockscreen processes when interactive calls (sudo/polkit/CLI) arrive
+    or when the session has been unlocked.
     """
-    lock_path = "/run/lock/synaptics-bio.lock"
     try:
         os.makedirs("/run/lock", exist_ok=True)
     except Exception:
         pass
-    try:
-        fd = open(lock_path, "a+")
+
+    start_t = time.time()
+    while True:
         try:
-            os.chmod(lock_path, 0o666)
+            fd = open(LOCK_PATH, "a+")
+            try:
+                os.chmod(LOCK_PATH, 0o666)
+            except Exception:
+                pass
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            # Lock acquired! Record metadata
+            try:
+                meta_tmp = f"{META_PATH}.tmp.{os.getpid()}"
+                with open(meta_tmp, "w") as fm:
+                    json.dump({"pid": os.getpid(), "mode": mode, "time": time.time()}, fm)
+                os.chmod(meta_tmp, 0o666)
+                os.replace(meta_tmp, META_PATH)
+            except Exception:
+                pass
+            return fd
+        except (BlockingIOError, OSError):
+            pass
+
+        # If lock couldn't be acquired, inspect current holder
+        holder_pid = None
+        holder_mode = None
+        if os.path.exists(META_PATH):
+            try:
+                with open(META_PATH, "r") as fm:
+                    meta = json.load(fm)
+                    holder_pid = meta.get("pid")
+                    holder_mode = meta.get("mode")
+            except Exception:
+                pass
+
+        holder_alive = False
+        if holder_pid and holder_pid != os.getpid():
+            try:
+                os.kill(holder_pid, 0)
+                holder_alive = True
+            except OSError:
+                holder_alive = False
+
+        if not holder_alive:
+            time.sleep(0.1)
+        else:
+            should_preempt = False
+            if holder_mode == "lockscreen":
+                if mode != "lockscreen":
+                    should_preempt = True
+                elif get_proc_ppid(holder_pid) == 1 or not is_screen_locked():
+                    should_preempt = True
+
+            if should_preempt:
+                try:
+                    os.kill(holder_pid, signal.SIGTERM)
+                except OSError:
+                    pass
+                clean_env = os.environ.copy()
+                subprocess.run(["podman", "rm", "-f", f"synaptics-bio-auth-{holder_pid}"],
+                               env=clean_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                subprocess.run(["pkill", "-x", "identify.exe"],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                for _ in range(5):
+                    try:
+                        os.kill(holder_pid, 0)
+                        time.sleep(0.1)
+                    except OSError:
+                        break
+                else:
+                    try:
+                        os.kill(holder_pid, signal.SIGKILL)
+                    except OSError:
+                        pass
+                time.sleep(0.1)
+            elif mode == "lockscreen":
+                return None
+
+        if time.time() - start_t >= timeout:
+            return None
+        time.sleep(0.1)
+
+def release_hardware_lock(lock_fd):
+    if lock_fd:
+        try:
+            if os.path.exists(META_PATH):
+                try:
+                    with open(META_PATH, "r") as fm:
+                        meta = json.load(fm)
+                    if meta.get("pid") == os.getpid():
+                        os.remove(META_PATH)
+                except Exception:
+                    pass
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            lock_fd.close()
         except Exception:
             pass
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        return fd
-    except (BlockingIOError, OSError):
-        return None
 
 def ensure_usb_powered():
     """
@@ -108,43 +235,6 @@ def extract_matched_identity(line, all_identities=None):
     return None
 
 def main():
-    # Check for bypass flag in root-controlled /run or /etc, or user-specific runtime dir
-    if os.path.exists("/run/synaptics-bio/disable-bio-auth") or os.path.exists("/etc/synaptics-bio/disable-bio-auth"):
-        sys.exit(1)
-
-    # Acquire hardware mutex lock to prevent concurrent sensor access collisions
-    lock_fd = acquire_hardware_lock()
-    if not lock_fd:
-        # Another process holds the sensor lock; immediately fallback to password
-        sys.exit(1)
-
-    uid = os.geteuid()
-    if uid == 0:
-        log_file = "/var/log/synaptics-bio-auth.log"
-        if not os.path.exists(log_file):
-            try:
-                with open(log_file, "a") as f:
-                    pass
-                os.chmod(log_file, 0o600)
-            except Exception:
-                log_file = "/tmp/synaptics-bio-auth-0.log"
-    else:
-        user_run = f"/run/user/{uid}"
-        if os.path.isdir(user_run):
-            log_file = os.path.join(user_run, "synaptics-bio-auth.log")
-        else:
-            log_file = f"/tmp/synaptics-bio-auth-{uid}.log"
-
-    pid = os.getpid()
-    container_name = f"synaptics-bio-auth-{pid}"
-
-    def write_log(msg):
-        try:
-            with open(log_file, "a") as f:
-                f.write(msg)
-        except Exception:
-            pass
-
     # Determine target user and display mode
     lockscreen_mode = "--lockscreen" in sys.argv
     compact_mode = "--compact" in sys.argv
@@ -161,6 +251,10 @@ def main():
     if not target_user:
         target_user = os.environ.get("USER") or "alex"
 
+    # Check for bypass flag in root-controlled /run or /etc, or user-specific runtime dir
+    if os.path.exists("/run/synaptics-bio/disable-bio-auth") or os.path.exists("/etc/synaptics-bio/disable-bio-auth"):
+        sys.exit(1)
+
     # Check for user-specific bypass flag
     try:
         target_pw = pwd.getpwnam(target_user)
@@ -168,6 +262,71 @@ def main():
             sys.exit(1)
     except Exception:
         pass
+
+    # Acquire hardware mutex lock to prevent concurrent sensor access collisions
+    auth_mode = "lockscreen" if lockscreen_mode else "interactive"
+    lock_fd = acquire_hardware_lock(mode=auth_mode)
+    if not lock_fd:
+        # Another process holds the sensor lock; immediately fallback to password
+        sys.exit(1)
+
+    uid = os.geteuid()
+    pid = os.getpid()
+    initial_ppid = os.getppid()
+    container_name = f"synaptics-bio-auth-{pid}"
+
+    # Sanitize environment unconditionally to isolate Podman & Wine from user sessions
+    clean_env = os.environ.copy()
+    for var in ["XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "XDG_SESSION_ID", "XDG_DATA_DIRS"]:
+        clean_env.pop(var, None)
+        os.environ.pop(var, None)
+    clean_env["HOME"] = "/root" if os.geteuid() == 0 else os.path.expanduser("~")
+    clean_env["PATH"] = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    os.environ["HOME"] = clean_env["HOME"]
+    os.environ["PATH"] = clean_env["PATH"]
+
+    def cleanup():
+        release_hardware_lock(lock_fd)
+        try:
+            subprocess.run(["podman", "rm", "-f", container_name],
+                           env=clean_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
+        except Exception:
+            pass
+
+    atexit.register(cleanup)
+
+    def sig_handler(signum, frame):
+        sys.exit(1)
+
+    signal.signal(signal.SIGTERM, sig_handler)
+    signal.signal(signal.SIGINT, sig_handler)
+    try:
+        signal.signal(signal.SIGHUP, sig_handler)
+    except Exception:
+        pass
+
+    if uid == 0:
+        log_file = "/var/log/synaptics-bio-auth.log"
+        if not os.path.exists(log_file):
+            try:
+                with open(log_file, "a") as f:
+                    pass
+                os.chmod(log_file, 0o600)
+            except Exception:
+                log_file = "/tmp/synaptics-bio-auth-0.log"
+    else:
+        user_run = f"/run/user/{uid}"
+        if os.path.isdir(user_run):
+            log_file = os.path.join(user_run, "synaptics-bio-auth.log")
+        else:
+            log_file = f"/tmp/synaptics-bio-auth-{uid}.log"
+
+    def write_log(msg):
+        try:
+            with open(log_file, "a") as f:
+                f.write(msg)
+        except Exception:
+            pass
 
     # Load configured allowed biometric identities for this user
     config_file = "/opt/synaptics-bio/identities.json"
@@ -228,16 +387,6 @@ def main():
                 except Exception:
                     pass
 
-    # Sanitize environment unconditionally to isolate Podman & Wine from user sessions
-    clean_env = os.environ.copy()
-    for var in ["XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "XDG_SESSION_ID", "XDG_DATA_DIRS"]:
-        clean_env.pop(var, None)
-        os.environ.pop(var, None)
-    clean_env["HOME"] = "/root" if os.geteuid() == 0 else os.path.expanduser("~")
-    clean_env["PATH"] = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-    os.environ["HOME"] = clean_env["HOME"]
-    os.environ["PATH"] = clean_env["PATH"]
-
     # Rotate log if larger than 1MB to prevent disk memory consumption
     try:
         if os.path.exists(log_file) and os.path.getsize(log_file) > 1024 * 1024:
@@ -252,11 +401,8 @@ def main():
     write_log(f"Target User: {target_user} (Allowed Identities: {sorted(list(allowed_identities))})\n")
     write_log(f"UID={os.getuid()} EUID={os.geteuid()}\n")
 
-    if not quiet_mode and not lockscreen_mode:
-        if compact_mode:
-            print(f"[Fingerprint] Sensor initializing for {target_user} (~5s)...", flush=True)
-        else:
-            print(f"[Fingerprint] Sensor initializing for {target_user} (~5s)...", flush=True)
+    if not quiet_mode:
+        print(f"[Fingerprint] Sensor initializing for {target_user} (~5s)...", flush=True)
 
     # 1. Clean up any stale wine/identify processes or lingering containers
     subprocess.run(["pkill", "-x", "identify.exe"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -378,6 +524,18 @@ def main():
                     write_log("Timeout waiting for fingerprint\n")
                     break
 
+                rlist, _, _ = select.select([proc.stdout], [], [], 0.5)
+
+                if lockscreen_mode:
+                    if os.getppid() == 1 or os.getppid() != initial_ppid or not is_screen_locked(uid):
+                        write_log("Session unlocked or parent exited, terminating lockscreen auth session\n")
+                        break
+
+                if not rlist:
+                    if proc.poll() is not None:
+                        break
+                    continue
+
                 line = proc.stdout.readline()
                 if not line and proc.poll() is not None:
                     break
@@ -426,12 +584,7 @@ def main():
                         can_retry = (attempt < max_attempts) and ((total_timeout - (time.time() - start_time)) > 4)
                         if not quiet_mode:
                             if can_retry:
-                                if lockscreen_mode:
-                                    print("Not recognized, scan again. Re-initializing sensor (~5s)...", flush=True)
-                                elif compact_mode:
-                                    print("[Fingerprint] Not recognized, scan again. Re-initializing sensor (~5s)...", flush=True)
-                                else:
-                                    print("[Fingerprint] Not recognized, scan again. Re-initializing sensor (~5s)...", flush=True)
+                                print("Fingerprint not recognized, please scan again. Re-initializing sensor (~5s)...", flush=True)
                             else:
                                 if lockscreen_mode:
                                     print("Fingerprint not recognized. Adjust finger or use password.", flush=True)
@@ -484,12 +637,12 @@ def main():
         sys.exit(1)
     else:
         write_log(f"Result: FAIL/FALLBACK (Target: {target_user})\n")
-        # On failure, recover sensor by clearing state
-        try:
-            subprocess.run(["usbreset", "06cb:0081"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
-            time.sleep(1.0)
-        except Exception:
-            pass
+        # On failure, recover sensor by clearing state if not aborted due to session unlock
+        if not lockscreen_mode or is_screen_locked(uid):
+            try:
+                subprocess.run(["usbreset", "06cb:0081"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
+            except Exception:
+                pass
         sys.exit(1)
 
 if __name__ == "__main__":
