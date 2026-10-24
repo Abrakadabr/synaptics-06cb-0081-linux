@@ -70,13 +70,6 @@ rm -f /usr/local/bin/synaptics-bio-delete
 rm -f /usr/lib/systemd/system-sleep/synaptics-bio-sleep
 echo "Removed /usr/local/bin/synaptics-bio-auth, synaptics-bio-enroll, synaptics-bio-delete, and sleep hook."
 
-# Restore KDE lockscreen QML
-LOCKSCREEN_QML="/usr/share/plasma/shells/org.kde.plasma.desktop/contents/lockscreen/LockScreenUi.qml"
-if [ -f "${LOCKSCREEN_QML}.orig-bio" ]; then
-    mv "${LOCKSCREEN_QML}.orig-bio" "${LOCKSCREEN_QML}"
-    echo "Restored ${LOCKSCREEN_QML} from backup."
-fi
-
 # 7. Clean /opt/synaptics-bio
 OPT_DIR="/opt/synaptics-bio"
 if [ -d "${OPT_DIR}" ]; then

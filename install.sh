@@ -147,17 +147,6 @@ if [ -d "/usr/lib/systemd/system-sleep" ]; then
     chmod 755 /usr/lib/systemd/system-sleep/synaptics-bio-sleep
 fi
 
-# Configure KDE Plasma lockscreen UI message replacement if present
-LOCKSCREEN_QML="/usr/share/plasma/shells/org.kde.plasma.desktop/contents/lockscreen/LockScreenUi.qml"
-if [ -f "${LOCKSCREEN_QML}" ]; then
-    if ! grep -q 'msg.startsWith("\[Fingerprint")' "${LOCKSCREEN_QML}"; then
-        cp "${LOCKSCREEN_QML}" "${LOCKSCREEN_QML}.orig-bio"
-        sed -i 's/if (!root.notification) {/if (!root.notification || msg.startsWith("[Fingerprint") || msg.startsWith("Fingerprint")) {/' "${LOCKSCREEN_QML}"
-        sed -i 's/root.notification += msg;/root.notification = msg;/' "${LOCKSCREEN_QML}"
-        echo "Configured KDE lockscreen UI message replacement."
-    fi
-fi
-
 # 7. Configure PAM (sudo & KDE lock screen)
 echo "[7/7] Configuring PAM authentication stack..."
 PAM_SUDO="/etc/pam.d/sudo"
