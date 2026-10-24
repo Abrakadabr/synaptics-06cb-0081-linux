@@ -186,9 +186,11 @@ The native KDE Plasma elevation popup will appear. Touch the sensor to authentic
 
 ---
 
-## Multi-User Configuration (`identities.json`)
+## Multi-User Configuration & Container Architecture
 
-User authorizations are defined in `/opt/synaptics-bio/identities.json`:
+### 1. Identity Mapping (`identities.json`)
+
+User authorizations and enrolled finger slots are defined in `/opt/synaptics-bio/identities.json`:
 
 ```json
 {
@@ -207,28 +209,54 @@ User authorizations are defined in `/opt/synaptics-bio/identities.json`:
 ```
 
 - Each Linux user maps to one or more allowed on-chip identity labels.
-- If a user tries to authenticate while another user's enrolled finger is touched, access is denied:
+- If a user attempts to authenticate while another user's enrolled finger is touched, access is immediately rejected:
   ```text
   [Fingerprint] Scanned finger belongs to 'kate', not 'alex'.
   ```
+
+### 2. Multi-User Shared Container Storage (`additionalimagestores`)
+
+When authenticating at the KDE Plasma lock screen, `kscreenlocker_greet` invokes PAM within the desktop user's unprivileged session (e.g., `alex` UID 1000 or `kate` UID 1001), triggering rootless Podman.
+
+To prevent duplicating the 1.37 GB Wine runtime image into each user's local directory (`~/.local/share/containers/storage`), the installer configures a system-wide drop-in at `/etc/containers/storage.conf.d/99-synaptics-bio.conf`:
+
+```toml
+[storage.options]
+additionalimagestores = [
+    "/var/lib/containers/storage"
+]
+```
+
+This grants all local users read-only access to the root-managed container image in `/var/lib/containers/storage` (`R/O: true`), allowing any user profile to unlock via fingerprint with zero duplicate disk usage.
 
 ---
 
 ## Useful Commands & Tips
 
 ### Temporary Sensor Bypass
-To temporarily skip fingerprint prompt and go straight to password:
+To temporarily skip the fingerprint prompt and go straight to password:
+
 ```bash
-touch /tmp/disable-bio-auth
+# Per-user bypass (only affects your current desktop user session):
+touch "/run/user/$(id -u)/disable-bio-auth"
+
+# System-wide global bypass (requires sudo, affects all users):
+sudo touch /run/synaptics-bio/disable-bio-auth
 ```
-To re-enable:
+
+To re-enable fingerprint authentication:
 ```bash
-rm -f /tmp/disable-bio-auth
+rm -f "/run/user/$(id -u)/disable-bio-auth"
+sudo rm -f /run/synaptics-bio/disable-bio-auth
 ```
 
 ### View Real-Time Authentication Logs
 ```bash
-tail -f /tmp/synaptics-bio-auth.log
+# Sudo & administrative elevation logs:
+sudo tail -f /var/log/synaptics-bio-auth.log
+
+# Desktop lock screen session logs:
+tail -f "/run/user/$(id -u)/synaptics-bio-auth.log"
 ```
 
 ### Sensor Manual Reset (Hardware Recovery)

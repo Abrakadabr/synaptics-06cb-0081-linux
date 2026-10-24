@@ -58,13 +58,19 @@ if [ -f "/etc/udev/rules.d/70-synaptics-bio.rules" ]; then
     echo "Removed /etc/udev/rules.d/70-synaptics-bio.rules."
 fi
 
-# 4. Remove CLI wrappers
+# 5. Remove Multi-User Shared Container Storage Drop-in
+if [ -f "/etc/containers/storage.conf.d/99-synaptics-bio.conf" ]; then
+    rm -f "/etc/containers/storage.conf.d/99-synaptics-bio.conf"
+    echo "Removed /etc/containers/storage.conf.d/99-synaptics-bio.conf."
+fi
+
+# 6. Remove CLI wrappers
 rm -f /usr/local/bin/synaptics-bio-auth
 rm -f /usr/local/bin/synaptics-bio-enroll
 rm -f /usr/local/bin/synaptics-bio-delete
 echo "Removed /usr/local/bin/synaptics-bio-auth, synaptics-bio-enroll, and synaptics-bio-delete."
 
-# 5. Clean /opt/synaptics-bio
+# 7. Clean /opt/synaptics-bio
 OPT_DIR="/opt/synaptics-bio"
 if [ -d "${OPT_DIR}" ]; then
     echo "Preserving enrolled database and calibration data in ${OPT_DIR}.backup..."
