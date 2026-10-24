@@ -23,6 +23,10 @@ case "$1/$2" in
                 fi
             fi
         done
+        # Recreate lockfile with global permissions so unprivileged desktop lock screen can access it
+        mkdir -p /run/synaptics-bio 2>/dev/null || true
+        chmod 0777 /run/synaptics-bio 2>/dev/null || true
+        touch /run/lock/synaptics-bio.lock 2>/dev/null && chmod 0666 /run/lock/synaptics-bio.lock 2>/dev/null || true
         /usr/bin/usbreset 06cb:0081 2>/dev/null || true
         ;;
 esac

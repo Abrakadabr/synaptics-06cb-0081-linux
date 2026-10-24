@@ -16,8 +16,40 @@ import fcntl
 import signal
 import atexit
 
-LOCK_PATH = "/run/lock/synaptics-bio.lock"
-META_PATH = "/run/lock/synaptics-bio.meta"
+RUN_BIO_DIR = "/run/synaptics-bio"
+
+def get_lock_paths():
+    """
+    Returns (lock_path, meta_path) ensuring the target directory is writable by both root
+    and unprivileged desktop sessions (e.g. KDE Plasma lockscreen).
+    """
+    try:
+        os.makedirs(RUN_BIO_DIR, exist_ok=True)
+        try:
+            os.chmod(RUN_BIO_DIR, 0o777)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+    if os.path.isdir(RUN_BIO_DIR) and os.access(RUN_BIO_DIR, os.W_OK):
+        return os.path.join(RUN_BIO_DIR, "lock"), os.path.join(RUN_BIO_DIR, "meta")
+
+    # Fallback to system /run/lock
+    lock_f = "/run/lock/synaptics-bio.lock"
+    meta_f = "/run/lock/synaptics-bio.meta"
+    try:
+        if os.path.exists(lock_f) and os.access(lock_f, os.W_OK):
+            return lock_f, meta_f
+    except Exception:
+        pass
+
+    uid = os.geteuid()
+    user_run = f"/run/user/{uid}"
+    if os.path.isdir(user_run) and os.access(user_run, os.W_OK):
+        return os.path.join(user_run, "synaptics-bio.lock"), os.path.join(user_run, "synaptics-bio.meta")
+
+    return lock_f, meta_f
 
 def is_screen_locked(uid=None):
     try:
@@ -51,30 +83,29 @@ def get_proc_ppid(pid):
 
 def acquire_hardware_lock(mode="interactive", timeout=3.0):
     """
-    Acquires an exclusive flock on /run/lock/synaptics-bio.lock to prevent concurrent
+    Acquires an exclusive flock on the hardware lockfile to prevent concurrent
     hardware access collisions between multiple PAM / CLI callers.
     Preempts orphaned lockscreen processes when interactive CLI calls arrive.
     """
-    try:
-        os.makedirs("/run/lock", exist_ok=True)
-    except Exception:
-        pass
-
+    lock_path, meta_path = get_lock_paths()
     start_t = time.time()
     while True:
         try:
-            fd = open(LOCK_PATH, "a+")
+            fd = open(lock_path, "a+")
             try:
-                os.chmod(LOCK_PATH, 0o666)
+                os.chmod(lock_path, 0o666)
             except Exception:
                 pass
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             try:
-                meta_tmp = f"{META_PATH}.tmp.{os.getpid()}"
+                meta_tmp = f"{meta_path}.tmp.{os.getpid()}"
                 with open(meta_tmp, "w") as fm:
                     json.dump({"pid": os.getpid(), "mode": mode, "time": time.time()}, fm)
-                os.chmod(meta_tmp, 0o666)
-                os.replace(meta_tmp, META_PATH)
+                try:
+                    os.chmod(meta_tmp, 0o666)
+                except Exception:
+                    pass
+                os.replace(meta_tmp, meta_path)
             except Exception:
                 pass
             return fd
@@ -83,9 +114,9 @@ def acquire_hardware_lock(mode="interactive", timeout=3.0):
 
         holder_pid = None
         holder_mode = None
-        if os.path.exists(META_PATH):
+        if os.path.exists(meta_path):
             try:
-                with open(META_PATH, "r") as fm:
+                with open(meta_path, "r") as fm:
                     meta = json.load(fm)
                     holder_pid = meta.get("pid")
                     holder_mode = meta.get("mode")
@@ -140,12 +171,13 @@ def acquire_hardware_lock(mode="interactive", timeout=3.0):
 def release_hardware_lock(lock_fd):
     if lock_fd:
         try:
-            if os.path.exists(META_PATH):
+            _, meta_path = get_lock_paths()
+            if os.path.exists(meta_path):
                 try:
-                    with open(META_PATH, "r") as fm:
+                    with open(meta_path, "r") as fm:
                         meta = json.load(fm)
                     if meta.get("pid") == os.getpid():
-                        os.remove(META_PATH)
+                        os.remove(meta_path)
                 except Exception:
                     pass
             fcntl.flock(lock_fd, fcntl.LOCK_UN)
@@ -281,11 +313,17 @@ def main():
     if len(sys.argv) > 1 and not sys.argv[1].isdigit() and not sys.argv[1].startswith("-"):
         target_user = sys.argv[1]
     if not target_user:
-        target_user = os.environ.get("SUDO_USER")
+        target_user = os.environ.get("SUDO_USER") or os.environ.get("USER")
     if not target_user:
-        target_user = os.environ.get("USER")
-    if not target_user:
-        target_user = "alex"
+        try:
+            target_user = pwd.getpwuid(os.getuid()).pw_name
+        except Exception:
+            target_user = None
+
+    if not target_user or target_user == "root":
+        print("Error: Target user could not be determined. Please specify a username:", file=sys.stderr)
+        print("  sudo synaptics-bio-enroll <username> [slot 1-10]", file=sys.stderr)
+        sys.exit(1)
 
     try:
         user_info = pwd.getpwnam(target_user)

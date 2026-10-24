@@ -70,10 +70,17 @@ Note: Biometric login on fresh boot will authenticate the user, but does not unl
 ## 3. Temporary Sensor Bypass
 
 If you want to skip fingerprint authentication and go straight to password input:
+
 ```bash
-touch /tmp/disable-bio-auth
+# Per-user bypass (only affects your desktop user session):
+touch "/run/user/$(id -u)/disable-bio-auth"
+
+# System-wide global bypass (requires sudo, affects all users):
+sudo touch /run/synaptics-bio/disable-bio-auth
 ```
+
 To re-enable:
 ```bash
-rm -f /tmp/disable-bio-auth
+rm -f "/run/user/$(id -u)/disable-bio-auth"
+sudo rm -f /run/synaptics-bio/disable-bio-auth
 ```

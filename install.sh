@@ -45,6 +45,9 @@ if [ ${#MISSING_PKGS[@]} -gt 0 ]; then
     elif command -v apt-get >/dev/null 2>&1; then
         echo "Installing missing packages with APT..."
         apt-get update && apt-get install -y podman python3 usbutils zstd
+    elif command -v pacman >/dev/null 2>&1; then
+        echo "Installing missing packages with Pacman..."
+        pacman -Sy --noconfirm podman python usbutils zstd
     else
         echo "Please install ${MISSING_PKGS[*]} using your distribution package manager." >&2
         exit 1
@@ -90,7 +93,7 @@ fi
 # Secure administrative ownership and permissions
 chown -R root:root "${OPT_DIR}"
 chmod 755 "${OPT_DIR}"
-chmod 666 "${OPT_DIR}/usb.txt" "${OPT_DIR}/.env" 2>/dev/null || true
+chmod 644 "${OPT_DIR}/usb.txt" "${OPT_DIR}/.env" 2>/dev/null || true
 [ -f "${OPT_DIR}/identities.json" ] && chmod 644 "${OPT_DIR}/identities.json"
 [ -f "${OPT_DIR}/CalibrationData.blob" ] && chmod 644 "${OPT_DIR}/CalibrationData.blob"
 chmod 755 "${OPT_DIR}"/*.dll "${OPT_DIR}"/*.exe 2>/dev/null || true
@@ -111,6 +114,7 @@ if ! podman --root "${STATIC_STORE}" --runroot /run/containers/storage image exi
     else
         echo "Attempting to pull pre-built container from GitHub Container Registry (${GHCR_IMAGE})..."
         podman --root "${STATIC_STORE}" --runroot /run/containers/storage pull "${GHCR_IMAGE}"
+        podman --root "${STATIC_STORE}" --runroot /run/containers/storage tag "${GHCR_IMAGE}" "${IMAGE_NAME}" 2>/dev/null || true
     fi
     podman --root "${STATIC_STORE}" --runroot /run/containers/storage tag "${IMAGE_NAME}" wine:validity 2>/dev/null || true
 fi
@@ -129,22 +133,36 @@ EOF
 chmod 644 "${CONF_DROPIN}"
 rm -f /etc/containers/storage.rootless.conf.d/99-synaptics-bio.conf
 
-# 6. Install Udev Rule and CLI Tools
-echo "[6/7] Installing Udev rules and CLI tools..."
+# 6. Install Udev Rule, Lock Directory, and CLI Tools
+echo "[6/7] Installing Udev rules, sleep hooks, and CLI tools..."
 rm -f /etc/udev/rules.d/99-synaptics-fingerprint.rules
 cp "${SCRIPT_DIR}/udev/70-synaptics-bio.rules" /etc/udev/rules.d/70-synaptics-bio.rules
-udevadm control --reload-rules
-udevadm trigger
+udevadm control --reload-rules 2>/dev/null || true
+udevadm trigger 2>/dev/null || true
 
 cp "${SCRIPT_DIR}/bin/synaptics-bio-auth" /usr/local/bin/synaptics-bio-auth
 cp "${SCRIPT_DIR}/bin/synaptics-bio-enroll" /usr/local/bin/synaptics-bio-enroll
 cp "${SCRIPT_DIR}/bin/synaptics-bio-delete" /usr/local/bin/synaptics-bio-delete
 chmod 755 /usr/local/bin/synaptics-bio-auth /usr/local/bin/synaptics-bio-enroll /usr/local/bin/synaptics-bio-delete
 
+# Install systemd tmpfiles configuration to ensure /run lock and runtime paths exist after reboot
+mkdir -p /etc/tmpfiles.d
+cat << 'EOF' > /etc/tmpfiles.d/synaptics-bio.conf
+d /run/synaptics-bio 0777 root root -
+f /run/lock/synaptics-bio.lock 0666 root root -
+EOF
+chmod 644 /etc/tmpfiles.d/synaptics-bio.conf
+mkdir -p /run/synaptics-bio
+chmod 0777 /run/synaptics-bio
+touch /run/lock/synaptics-bio.lock
+chmod 0666 /run/lock/synaptics-bio.lock
+
 # Install systemd suspend/resume hook to keep USB sensor healthy across sleep
-if [ -d "/usr/lib/systemd/system-sleep" ]; then
-    cp "${SCRIPT_DIR}/scripts/synaptics-bio-sleep.sh" /usr/lib/systemd/system-sleep/synaptics-bio-sleep
-    chmod 755 /usr/lib/systemd/system-sleep/synaptics-bio-sleep
+SLEEP_HOOK_DIR="/etc/systemd/system-sleep"
+[ ! -d "${SLEEP_HOOK_DIR}" ] && SLEEP_HOOK_DIR="/usr/lib/systemd/system-sleep"
+if [ -d "${SLEEP_HOOK_DIR}" ]; then
+    cp "${SCRIPT_DIR}/scripts/synaptics-bio-sleep.sh" "${SLEEP_HOOK_DIR}/synaptics-bio-sleep"
+    chmod 755 "${SLEEP_HOOK_DIR}/synaptics-bio-sleep"
 fi
 
 # Configure KDE Plasma lockscreen UI message replacement and keepalive if present
@@ -159,7 +177,11 @@ PAM_SUDO="/etc/pam.d/sudo"
 if [ -f "${PAM_SUDO}" ]; then
     if ! grep -q "synaptics-bio-auth" "${PAM_SUDO}"; then
         cp "${PAM_SUDO}" "${PAM_SUDO}.orig-bio"
-        sed -i '/auth[[:space:]]\+include[[:space:]]\+system-auth/i auth       sufficient   pam_exec.so quiet stdout /usr/local/bin/synaptics-bio-auth' "${PAM_SUDO}"
+        if grep -q "include[[:space:]]\+system-auth" "${PAM_SUDO}"; then
+            sed -i '/auth[[:space:]]\+include[[:space:]]\+system-auth/i auth       sufficient   pam_exec.so quiet stdout /usr/local/bin/synaptics-bio-auth' "${PAM_SUDO}"
+        elif grep -q "common-auth" "${PAM_SUDO}"; then
+            sed -i '/common-auth/i auth       sufficient   pam_exec.so quiet stdout /usr/local/bin/synaptics-bio-auth' "${PAM_SUDO}"
+        fi
         echo "Configured ${PAM_SUDO} (backup: ${PAM_SUDO}.orig-bio)."
     else
         echo "${PAM_SUDO} is already configured."
@@ -170,7 +192,13 @@ PAM_KDE="/etc/pam.d/kde"
 if [ -f "${PAM_KDE}" ]; then
     if ! grep -q "synaptics-bio-auth" "${PAM_KDE}"; then
         cp "${PAM_KDE}" "${PAM_KDE}.orig-bio"
-        sed -i '/auth[[:space:]]\+substack[[:space:]]\+password-auth/i auth       sufficient   pam_exec.so quiet stdout /usr/local/bin/synaptics-bio-auth --lockscreen' "${PAM_KDE}"
+        if grep -q "password-auth" "${PAM_KDE}"; then
+            sed -i '/auth[[:space:]]\+substack[[:space:]]\+password-auth/i auth       sufficient   pam_exec.so quiet stdout /usr/local/bin/synaptics-bio-auth --lockscreen' "${PAM_KDE}"
+        elif grep -q "common-auth" "${PAM_KDE}"; then
+            sed -i '/common-auth/i auth       sufficient   pam_exec.so quiet stdout /usr/local/bin/synaptics-bio-auth --lockscreen' "${PAM_KDE}"
+        elif grep -q "system-login" "${PAM_KDE}"; then
+            sed -i '/system-login/i auth       sufficient   pam_exec.so quiet stdout /usr/local/bin/synaptics-bio-auth --lockscreen' "${PAM_KDE}"
+        fi
         echo "Configured ${PAM_KDE} (backup: ${PAM_KDE}.orig-bio)."
     else
         sed -i 's|/usr/local/bin/synaptics-bio-auth.*|/usr/local/bin/synaptics-bio-auth --lockscreen|' "${PAM_KDE}"
@@ -185,7 +213,11 @@ if [ ! -f "${PAM_POLKIT}" ]; then
     echo "Configured ${PAM_POLKIT} (KDE GUI authentication popups)."
 elif ! grep -q "synaptics-bio-auth" "${PAM_POLKIT}"; then
     cp "${PAM_POLKIT}" "${PAM_POLKIT}.orig-bio"
-    sed -i '/auth[[:space:]]\+include[[:space:]]\+system-auth/i auth       sufficient   pam_exec.so quiet stdout /usr/local/bin/synaptics-bio-auth' "${PAM_POLKIT}"
+    if grep -q "include[[:space:]]\+system-auth" "${PAM_POLKIT}"; then
+        sed -i '/auth[[:space:]]\+include[[:space:]]\+system-auth/i auth       sufficient   pam_exec.so quiet stdout /usr/local/bin/synaptics-bio-auth' "${PAM_POLKIT}"
+    elif grep -q "common-auth" "${PAM_POLKIT}"; then
+        sed -i '/common-auth/i auth       sufficient   pam_exec.so quiet stdout /usr/local/bin/synaptics-bio-auth' "${PAM_POLKIT}"
+    fi
     echo "Configured ${PAM_POLKIT} (backup: ${PAM_POLKIT}.orig-bio)."
 else
     echo "${PAM_POLKIT} is already configured."

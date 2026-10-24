@@ -10,6 +10,8 @@ if [ "${EUID}" -ne 0 ]; then
     exit 1
 fi
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 echo "=========================================================="
 echo "   Uninstalling Synaptics 06cb:0081 Biometric Support"
 echo "=========================================================="
@@ -45,16 +47,16 @@ if [ -f "${PAM_POLKIT}" ]; then
         mv "${PAM_POLKIT}.orig-bio" "${PAM_POLKIT}"
         echo "Restored ${PAM_POLKIT} from original backup."
     else
-        rm -f "${PAM_POLKIT}"
-        echo "Removed custom ${PAM_POLKIT}."
+        sed -i '/synaptics-bio-auth/d' "${PAM_POLKIT}"
+        echo "Removed synaptics-bio-auth rule from ${PAM_POLKIT}."
     fi
 fi
 
 # 4. Remove Udev Rule
 if [ -f "/etc/udev/rules.d/70-synaptics-bio.rules" ]; then
     rm -f "/etc/udev/rules.d/70-synaptics-bio.rules"
-    udevadm control --reload-rules
-    udevadm trigger
+    udevadm control --reload-rules 2>/dev/null || true
+    udevadm trigger 2>/dev/null || true
     echo "Removed /etc/udev/rules.d/70-synaptics-bio.rules."
 fi
 
@@ -67,12 +69,16 @@ if [ -d "/usr/share/containers/storage" ]; then
 fi
 echo "Removed multi-user container storage drop-ins."
 
-# 6. Remove CLI wrappers and sleep hook
+# 6. Remove CLI wrappers, sleep hook, tmpfiles config, and locks
 rm -f /usr/local/bin/synaptics-bio-auth
 rm -f /usr/local/bin/synaptics-bio-enroll
 rm -f /usr/local/bin/synaptics-bio-delete
+rm -f /etc/systemd/system-sleep/synaptics-bio-sleep
 rm -f /usr/lib/systemd/system-sleep/synaptics-bio-sleep
-echo "Removed /usr/local/bin/synaptics-bio-auth, synaptics-bio-enroll, synaptics-bio-delete, and sleep hook."
+rm -f /etc/tmpfiles.d/synaptics-bio.conf
+rm -f /run/lock/synaptics-bio.lock /run/lock/synaptics-bio.meta
+rm -rf /run/synaptics-bio
+echo "Removed CLI tools, sleep hooks, and tmpfiles configuration."
 
 # Restore KDE lockscreen QML
 LOCKSCREEN_QML="/usr/share/plasma/shells/org.kde.plasma.desktop/contents/lockscreen/LockScreenUi.qml"

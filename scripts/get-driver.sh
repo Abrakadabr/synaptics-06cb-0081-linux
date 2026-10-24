@@ -74,6 +74,10 @@ if [ "${ACTUAL_ORIG_SHA256}" != "${EXPECTED_ORIG_SHA256}" ]; then
     echo "Warning: synaWudfBioUsb.dll SHA256 (${ACTUAL_ORIG_SHA256}) differs from expected (${EXPECTED_ORIG_SHA256})."
 fi
 
+if [ "${ACTUAL_ADAPTER_SHA256}" != "${EXPECTED_ADAPTER_SHA256}" ]; then
+    echo "Warning: synaAdvAdapter.dll SHA256 (${ACTUAL_ADAPTER_SHA256}) differs from expected (${EXPECTED_ADAPTER_SHA256})."
+fi
+
 cp -p "${SOURCE_DIR}/synaAdvAdapter.dll" "${TARGET_DIR}/synaAdvAdapter.dll"
 cp -p "${SOURCE_DIR}/synaWudfBioUsb.dll" "${TARGET_DIR}/synawudfbiousb.dll.lenovo_orig"
 cp -p "${SOURCE_DIR}/synaWudfBioUsb.dll" "${TARGET_DIR}/synawudfbiousb.dll"

@@ -17,10 +17,8 @@ if [ ! -f "${ARCHIVE_PATH}" ]; then
     ARCHIVE_PATH="/opt/synaptics-bio/wine-validity.tar.zst"
 fi
 
-if [ ! -f "${ARCHIVE_PATH}" ]; then
-    echo "Error: wine-validity.tar.zst archive not found." >&2
-    exit 1
-fi
+GHCR_IMAGE="ghcr.io/abrakadabr/synaptics-06cb-0081-linux:latest"
+IMAGE_NAME="localhost/wine:validity"
 
 STATIC_STORE="/usr/share/containers/storage"
 CONF_DROPIN="/etc/containers/storage.conf.d/99-synaptics-bio.conf"
@@ -29,7 +27,11 @@ echo "=========================================================="
 echo "   Synaptics 06cb:0081 Multi-User Static Image Store Setup"
 echo "=========================================================="
 echo "Store Location: ${STATIC_STORE}"
-echo "Archive Source: ${ARCHIVE_PATH}"
+if [ -f "${ARCHIVE_PATH}" ]; then
+    echo "Archive Source: ${ARCHIVE_PATH}"
+else
+    echo "Archive Source: Remote GHCR (${GHCR_IMAGE})"
+fi
 echo ""
 
 # 1. Clean up any previous conflicting drop-ins
@@ -38,9 +40,15 @@ rm -f /etc/containers/storage.rootless.conf.d/99-synaptics-bio.conf
 
 # 2. Populate static store
 mkdir -p "${STATIC_STORE}"
-echo "[1/3] Loading Wine runtime image into ${STATIC_STORE}..."
-zstdcat "${ARCHIVE_PATH}" | podman --root "${STATIC_STORE}" --runroot /run/containers/storage load
-podman --root "${STATIC_STORE}" tag localhost/wine:validity wine:validity 2>/dev/null || true
+if [ -f "${ARCHIVE_PATH}" ]; then
+    echo "[1/3] Loading Wine runtime image from ${ARCHIVE_PATH} into ${STATIC_STORE}..."
+    zstdcat "${ARCHIVE_PATH}" | podman --root "${STATIC_STORE}" --runroot /run/containers/storage load
+else
+    echo "[1/3] Local archive not found. Pulling from GitHub Container Registry (${GHCR_IMAGE})..."
+    podman --root "${STATIC_STORE}" --runroot /run/containers/storage pull "${GHCR_IMAGE}"
+    podman --root "${STATIC_STORE}" --runroot /run/containers/storage tag "${GHCR_IMAGE}" "${IMAGE_NAME}" 2>/dev/null || true
+fi
+podman --root "${STATIC_STORE}" --runroot /run/containers/storage tag "${IMAGE_NAME}" wine:validity 2>/dev/null || true
 
 # 3. Set global read/traversal permissions
 echo "[2/3] Setting static read/execute permissions..."
