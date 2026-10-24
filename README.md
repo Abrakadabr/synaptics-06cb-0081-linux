@@ -186,9 +186,7 @@ The native KDE Plasma elevation popup will appear. Touch the sensor to authentic
 
 ---
 
-## Multi-User Configuration & Container Architecture
-
-### 1. Identity Mapping (`identities.json`)
+## Multi-User Configuration (`identities.json`)
 
 User authorizations and enrolled finger slots are defined in `/opt/synaptics-bio/identities.json`:
 
@@ -213,21 +211,6 @@ User authorizations and enrolled finger slots are defined in `/opt/synaptics-bio
   ```text
   [Fingerprint] Scanned finger belongs to 'kate', not 'alex'.
   ```
-
-### 2. Multi-User Shared Container Storage (`additionalimagestores`)
-
-When authenticating at the KDE Plasma lock screen, `kscreenlocker_greet` invokes PAM within the desktop user's unprivileged session (e.g., `alex` UID 1000 or `kate` UID 1001), triggering rootless Podman.
-
-To prevent duplicating the 1.37 GB Wine runtime image into each user's local directory (`~/.local/share/containers/storage`), the installer configures a rootless drop-in at `/etc/containers/storage.rootless.conf.d/99-synaptics-bio.conf`:
-
-```toml
-[storage.options]
-additionalimagestores = [
-    "/var/lib/containers/storage"
-]
-```
-
-This grants all local users read-only access to the root-managed container image in `/var/lib/containers/storage` (`R/O: true`), allowing any user profile to unlock via fingerprint with zero duplicate disk usage.
 
 ---
 
