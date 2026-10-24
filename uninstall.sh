@@ -58,9 +58,13 @@ if [ -f "/etc/udev/rules.d/70-synaptics-bio.rules" ]; then
     echo "Removed /etc/udev/rules.d/70-synaptics-bio.rules."
 fi
 
-# 5. Remove Multi-User Shared Container Storage Drop-in
+# 5. Remove Multi-User Shared Container Storage Drop-in and Static Store
 rm -f "/etc/containers/storage.conf.d/99-synaptics-bio.conf"
 rm -f "/etc/containers/storage.rootless.conf.d/99-synaptics-bio.conf"
+if [ -d "/usr/share/containers/storage" ]; then
+    rm -rf "/usr/share/containers/storage"
+    echo "Removed /usr/share/containers/storage."
+fi
 echo "Removed multi-user container storage drop-ins."
 
 # 6. Remove CLI wrappers and sleep hook

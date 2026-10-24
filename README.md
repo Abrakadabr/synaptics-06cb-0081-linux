@@ -212,6 +212,20 @@ User authorizations and enrolled finger slots are defined in `/opt/synaptics-bio
   [Fingerprint] Scanned finger belongs to 'kate', not 'alex'.
   ```
 
+### Static System Image Store (`/usr/share/containers/storage`)
+
+When desktop users (e.g., `kate` or `alex` under KDE Plasma lock screen) authenticate, PAM executes within their unprivileged user session. To avoid duplicating the 1.37 GB Wine container image across individual user accounts (`~/.local/share/containers/storage`), the installer configures a static system image store:
+
+1. **Dedicated Read-Only Store:** The image is installed once into `/usr/share/containers/storage` with global read/execute permissions (`a+rX`).
+2. **System-Wide Drop-in:** `/etc/containers/storage.conf.d/99-synaptics-bio.conf` declares:
+   ```toml
+   [storage.options]
+   additionalimagestores = [
+       "/usr/share/containers/storage"
+   ]
+   ```
+3. **Lock & Collision Free:** Because `/usr/share/containers/storage` is separate from root's active graphroot (`/var/lib/containers/storage`), root never creates volatile layers or runtime lock files there. All users (`alex`, `kate`, and future accounts) share the single container image read-only with zero disk overhead and zero lock collisions.
+
 ---
 
 ## Useful Commands & Tips

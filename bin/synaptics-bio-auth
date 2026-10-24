@@ -376,14 +376,16 @@ def main():
         except Exception:
             pass
 
-        # Clean up any conflicting multi-user storage drop-ins that cause graphroot collisions
-        for bad_f in [
+        # Only clean up legacy drop-ins if they improperly reference /var/lib/containers/storage (graphroot collision)
+        for check_f in [
             "/etc/containers/storage.conf.d/99-synaptics-bio.conf",
             "/etc/containers/storage.rootless.conf.d/99-synaptics-bio.conf"
         ]:
-            if os.path.exists(bad_f):
+            if os.path.exists(check_f):
                 try:
-                    os.remove(bad_f)
+                    with open(check_f, "r") as f_chk:
+                        if "/var/lib/containers/storage" in f_chk.read():
+                            os.remove(check_f)
                 except Exception:
                     pass
 

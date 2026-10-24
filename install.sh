@@ -95,38 +95,38 @@ chmod 666 "${OPT_DIR}/usb.txt" "${OPT_DIR}/.env" 2>/dev/null || true
 [ -f "${OPT_DIR}/CalibrationData.blob" ] && chmod 644 "${OPT_DIR}/CalibrationData.blob"
 chmod 755 "${OPT_DIR}"/*.dll "${OPT_DIR}"/*.exe 2>/dev/null || true
 
-# 5. Container Image Setup
-echo "[5/7] Verifying container execution environment..."
-IMAGE_READY=false
-if podman image exists "${IMAGE_NAME}" 2>/dev/null || podman image exists "wine:validity" 2>/dev/null; then
-    echo "Found local Wine runtime container image."
-    podman tag localhost/wine:validity wine:validity 2>/dev/null || true
-    IMAGE_READY=true
-fi
+# 5. Multi-User Static Image Store Setup (/usr/share/containers/storage)
+echo "[5/7] Setting up shared static container storage in /usr/share/containers/storage..."
+STATIC_STORE="/usr/share/containers/storage"
+CONF_DROPIN="/etc/containers/storage.conf.d/99-synaptics-bio.conf"
 
-if [ "$IMAGE_READY" = false ]; then
-    # Check for local compressed backup
+mkdir -p "${STATIC_STORE}"
+if ! podman --root "${STATIC_STORE}" --runroot /run/containers/storage image exists "${IMAGE_NAME}" 2>/dev/null; then
     if [ -f "${SCRIPT_DIR}/wine-validity.tar.zst" ]; then
-        echo "Loading ${SCRIPT_DIR}/wine-validity.tar.zst into Podman storage..."
-        zstdcat "${SCRIPT_DIR}/wine-validity.tar.zst" | podman load
-        IMAGE_READY=true
+        echo "Loading ${SCRIPT_DIR}/wine-validity.tar.zst into ${STATIC_STORE}..."
+        zstdcat "${SCRIPT_DIR}/wine-validity.tar.zst" | podman --root "${STATIC_STORE}" --runroot /run/containers/storage load
+    elif [ -f "${OPT_DIR}/wine-validity.tar.zst" ]; then
+        echo "Loading ${OPT_DIR}/wine-validity.tar.zst into ${STATIC_STORE}..."
+        zstdcat "${OPT_DIR}/wine-validity.tar.zst" | podman --root "${STATIC_STORE}" --runroot /run/containers/storage load
     else
         echo "Attempting to pull pre-built container from GitHub Container Registry (${GHCR_IMAGE})..."
-        if podman pull "${GHCR_IMAGE}" 2>/dev/null; then
-            podman tag "${GHCR_IMAGE}" "${IMAGE_NAME}"
-            podman tag "${GHCR_IMAGE}" wine:validity
-            IMAGE_READY=true
-        else
-            echo "Note: Container registry image not yet published. Building container locally..."
-            podman build -t "${IMAGE_NAME}" -f "${SCRIPT_DIR}/container/Containerfile" "${SCRIPT_DIR}"
-            podman tag "${IMAGE_NAME}" wine:validity
-            IMAGE_READY=true
-        fi
+        podman --root "${STATIC_STORE}" --runroot /run/containers/storage pull "${GHCR_IMAGE}"
     fi
+    podman --root "${STATIC_STORE}" --runroot /run/containers/storage tag "${IMAGE_NAME}" wine:validity 2>/dev/null || true
 fi
 
-# Clean up any legacy shared storage drop-ins that cause layer lock collisions
-rm -f /etc/containers/storage.conf.d/99-synaptics-bio.conf
+# Ensure all users have static read/execute traversal permissions
+chmod -R a+rX "${STATIC_STORE}"
+
+# Configure additional image store drop-in for all container engines
+mkdir -p /etc/containers/storage.conf.d
+cat << 'EOF' > "${CONF_DROPIN}"
+[storage.options]
+additionalimagestores = [
+    "/usr/share/containers/storage"
+]
+EOF
+chmod 644 "${CONF_DROPIN}"
 rm -f /etc/containers/storage.rootless.conf.d/99-synaptics-bio.conf
 
 # 6. Install Udev Rule and CLI Tools
