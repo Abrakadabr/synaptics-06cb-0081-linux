@@ -239,7 +239,8 @@ def main():
     ]
 
     proc = None
-    sample_count = 0
+    accepted_samples = 0
+    total_samples = 6
     awaiting_touch = False
     committed = False
 
@@ -263,14 +264,45 @@ def main():
 
             # Detect sensor waiting for finger touch
             if "about to IOCTL_BIOMETRIC_CAPTURE_DATA" in line:
-                sample_count += 1
                 awaiting_touch = True
-                print(f"[Fingerprint Enrollment] Touch sensor with finger to register (Sample #{sample_count}/6)...", flush=True)
+                prompt_num = min(accepted_samples + 1, total_samples)
+                print(f"[Fingerprint Enrollment] Touch sensor with finger to register (Sample #{prompt_num}/{total_samples})...", flush=True)
 
-            # Detect successful sample update
-            elif "about to Update Enrollment" in line:
+            # SensorStatus 2 indicates sensor capture timeout or finger removed prematurely
+            elif "SensorStatus 2" in line:
                 awaiting_touch = False
-                print(f"[Fingerprint Enrollment] Sample #{sample_count} accepted. Lift finger.", flush=True)
+                print("[Fingerprint Enrollment] Touch not detected or released too quickly. Please touch again.", flush=True)
+
+            # Parse Update Enrollment result (status and progress byte)
+            elif "Got back 0x2c bytes:" in line:
+                awaiting_touch = False
+                m = re.search(r"Got back 0x2c bytes:\s*([0-9a-fA-F]+)", line)
+                if m:
+                    hex_data = m.group(1).lower()
+                    status_hex = hex_data[:8]
+                    try:
+                        progress_pct = int(hex_data[72:74], 16) if len(hex_data) >= 74 else 0
+                    except ValueError:
+                        progress_pct = 0
+
+                    if status_hex == "01000900":  # WINBIO_I_MORE_DATA (Sample accepted, more needed)
+                        accepted_samples += 1
+                        if accepted_samples >= total_samples and progress_pct < 100:
+                            total_samples = accepted_samples + 1
+                        print(f"[Fingerprint Enrollment] Sample #{accepted_samples}/{total_samples} accepted ({progress_pct}%). Lift finger.", flush=True)
+
+                    elif status_hex == "00000000":  # S_OK (Enrollment complete!)
+                        accepted_samples = total_samples
+                        print(f"[Fingerprint Enrollment] Sample #{total_samples}/{total_samples} accepted (100%). Lift finger.", flush=True)
+
+                    elif status_hex == "08800980":  # WINBIO_E_BAD_CAPTURE
+                        print("[Fingerprint Enrollment] Poor quality touch or bad capture. Please adjust finger and try again.", flush=True)
+
+                    elif status_hex == "0a800980":  # WINBIO_E_DUPLICATE_SAMPLE
+                        print("[Fingerprint Enrollment] Duplicate sample. Please shift finger angle slightly and try again.", flush=True)
+
+                    else:
+                        print(f"[Fingerprint Enrollment] Sample not accepted (status 0x{status_hex}). Please try again.", flush=True)
 
             # Detect enrollment commitment to secure chip storage
             elif "about to Commit Enrollment" in line:
