@@ -125,16 +125,18 @@ if [ "$IMAGE_READY" = false ]; then
     fi
 fi
 
-# Configure multi-user shared container storage (Rule A compliant)
-echo "Configuring multi-user shared container storage..."
-mkdir -p /etc/containers/storage.conf.d
-cat << 'EOF' > /etc/containers/storage.conf.d/99-synaptics-bio.conf
+# Configure multi-user shared container storage for rootless sessions (Rule A compliant)
+# Note: Must be placed in storage.rootless.conf.d to prevent root graphroot self-deadlock
+echo "Configuring multi-user shared container storage for rootless users..."
+rm -f /etc/containers/storage.conf.d/99-synaptics-bio.conf
+mkdir -p /etc/containers/storage.rootless.conf.d
+cat << 'EOF' > /etc/containers/storage.rootless.conf.d/99-synaptics-bio.conf
 [storage.options]
 additionalimagestores = [
     "/var/lib/containers/storage"
 ]
 EOF
-chmod 644 /etc/containers/storage.conf.d/99-synaptics-bio.conf
+chmod 644 /etc/containers/storage.rootless.conf.d/99-synaptics-bio.conf
 chmod -R +rX /var/lib/containers/storage 2>/dev/null || true
 
 # 6. Install Udev Rule and CLI Tools

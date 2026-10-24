@@ -218,7 +218,7 @@ User authorizations and enrolled finger slots are defined in `/opt/synaptics-bio
 
 When authenticating at the KDE Plasma lock screen, `kscreenlocker_greet` invokes PAM within the desktop user's unprivileged session (e.g., `alex` UID 1000 or `kate` UID 1001), triggering rootless Podman.
 
-To prevent duplicating the 1.37 GB Wine runtime image into each user's local directory (`~/.local/share/containers/storage`), the installer configures a system-wide drop-in at `/etc/containers/storage.conf.d/99-synaptics-bio.conf`:
+To prevent duplicating the 1.37 GB Wine runtime image into each user's local directory (`~/.local/share/containers/storage`), the installer configures a rootless drop-in at `/etc/containers/storage.rootless.conf.d/99-synaptics-bio.conf`:
 
 ```toml
 [storage.options]
