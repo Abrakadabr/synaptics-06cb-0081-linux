@@ -209,121 +209,172 @@ def main():
         except Exception:
             pass
 
-    cmd = [
-        "podman", "run", "--rm",
-        "--init",
-        "--name", container_name,
-        "--net=none",
-        "--security-opt", "label=disable",
-        "--device", dev_path,
-        "-v", "/dev/bus/usb:/dev/bus/usb",
-        "-e", "WINEPATH=/usr/lib/gcc/x86_64-w64-mingw32/10-win32;/usr/x86_64-w64-mingw32/lib",
-        "-e", "WINEDEBUG=fixme-all,err-all,trace+winusb",
-        "-w", opt_dir,
-        "-e", "USB_SCRIPT=/tmp/usb-trace.txt",
-        "-v", f"{opt_dir}:{opt_dir}",
-        "-v", f"{opt_dir}/usb.txt:/root/.wine/drive_c/usb.txt",
-        image,
-        "sh", "-c", "wine64 ./identify.exe identify"
-    ]
-
-    proc = None
-    ready_announced = False
-    polling_armed = False
-    contact_detected = False
     success = False
     matched_identity = None
     wrong_user_match = None
+    max_attempts = 3
+    attempt = 0
     start_time = time.time()
+    total_timeout = 30
 
-    try:
-        proc = subprocess.Popen(
-            cmd,
-            env=clean_env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            errors="replace",
-            bufsize=1
-        )
+    while attempt < max_attempts:
+        attempt += 1
+        elapsed = time.time() - start_time
+        remaining = total_timeout - elapsed
+        if remaining <= 3:
+            write_log(f"Insufficient time remaining ({remaining:.1f}s) for attempt {attempt}\n")
+            break
 
-        while True:
-            # 30s timeout
-            if time.time() - start_time > 30:
-                write_log("Timeout waiting for fingerprint\n")
-                break
+        write_log(f"--- Scan Session Attempt {attempt}/{max_attempts} (Time remaining: {remaining:.1f}s) ---\n")
 
-            line = proc.stdout.readline()
-            if not line and proc.poll() is not None:
-                break
+        # Clean up any stale wine/identify processes or lingering containers
+        subprocess.run(["pkill", "-x", "identify.exe"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["podman", "rm", "-f", container_name], env=clean_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-            if line:
-                write_log(line)
-
-                # Sensor is armed and actively waiting for finger touch
-                if not ready_announced and ("about to IOCTL_BIOMETRIC_CAPTURE_DATA" in line or "PipeID=131" in line or "libusb_interrupt_transfer=-7!" in line):
-                    ready_announced = True
-                    if not quiet_mode:
-                        if lockscreen_mode:
-                            print(f"(Touch fingerprint sensor to authenticate as '{target_user}')", flush=True)
-                        elif compact_mode:
-                            print(f"[Fingerprint] Touch sensor to authenticate as '{target_user}'", flush=True)
-                        else:
-                            print(f"\n[Fingerprint Auth] >>> Place enrolled finger to authenticate as '{target_user}' <<<", flush=True)
-
-                # Polling loop entered (-7! indicates sensor is actively awaiting finger touch on pipe 131)
-                if ready_announced and "libusb_interrupt_transfer=-7!" in line:
-                    polling_armed = True
-
-                # Physical contact detected: either transfer=0! after entering polling loop, or capture data arrived (sz=80)
-                if ready_announced and not contact_detected and ("sz=80" in line or (polling_armed and "libusb_interrupt_transfer=0!" in line)):
-                    contact_detected = True
-                    if not quiet_mode and not lockscreen_mode:
-                        if compact_mode:
-                            print(f"[Fingerprint] Contact detected, scanning...", flush=True)
-                        else:
-                            print("[Fingerprint] Contact detected, scanning...", flush=True)
-
-                # Check for on-chip template match
-                matched_id = extract_matched_identity(line, all_identities)
-                if matched_id:
-                    matched_identity = matched_id
-                    if matched_id in allowed_identities:
-                        success = True
-                    else:
-                        wrong_user_match = matched_id
-                    break
-
-                # If no match occurred from on-chip comparison
-                if "1f800980" in line or "WINBIO_E_NO_MATCH" in line:
-                    contact_detected = False
-                    if not quiet_mode:
-                        if lockscreen_mode:
-                            print(f"Fingerprint not recognized. Adjust finger or use password.", flush=True)
-                        elif compact_mode:
-                            print(f"[Fingerprint] Not recognized. Adjust finger and try again...", flush=True)
-                        else:
-                            print("[Fingerprint] Not recognized. Adjust finger and try again...", flush=True)
-
-        if proc and proc.poll() is None:
-            proc.terminate()
+        # On retries, give the USB bus and cryptoprocessor a brief moment to reset
+        if attempt > 1:
             try:
-                proc.wait(timeout=2)
-            except Exception:
-                proc.kill()
-
-    except Exception as e:
-        write_log(f"Exception during auth: {e}\n")
-    finally:
-        if proc and proc.poll() is None:
-            try:
-                proc.kill()
+                subprocess.run(["usbreset", "06cb:0081"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
             except Exception:
                 pass
+            time.sleep(1.0)
+
+        # Re-check device node
+        dev_path = get_usb_dev_path()
+        if not dev_path or not os.path.exists(dev_path):
+            write_log("Device 06cb:0081 not found during retry\n")
+            break
+
+        cmd = [
+            "podman", "run", "--rm",
+            "--init",
+            "--name", container_name,
+            "--net=none",
+            "--security-opt", "label=disable",
+            "--device", dev_path,
+            "-v", "/dev/bus/usb:/dev/bus/usb",
+            "-e", "WINEPATH=/usr/lib/gcc/x86_64-w64-mingw32/10-win32;/usr/x86_64-w64-mingw32/lib",
+            "-e", "WINEDEBUG=fixme-all,err-all,trace+winusb",
+            "-w", opt_dir,
+            "-e", "USB_SCRIPT=/tmp/usb-trace.txt",
+            "-v", f"{opt_dir}:{opt_dir}",
+            "-v", f"{opt_dir}/usb.txt:/root/.wine/drive_c/usb.txt",
+            image,
+            "sh", "-c", "wine64 ./identify.exe identify"
+        ]
+
+        proc = None
+        ready_announced = False
+        polling_armed = False
+        contact_detected = False
+        no_match_detected = False
+
         try:
-            subprocess.run(["podman", "rm", "-f", container_name], env=clean_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=4)
-        except Exception:
-            pass
+            proc = subprocess.Popen(
+                cmd,
+                env=clean_env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                errors="replace",
+                bufsize=1
+            )
+
+            while True:
+                if time.time() - start_time > total_timeout:
+                    write_log("Timeout waiting for fingerprint\n")
+                    break
+
+                line = proc.stdout.readline()
+                if not line and proc.poll() is not None:
+                    break
+
+                if line:
+                    write_log(line)
+
+                    # Sensor is armed and actively waiting for finger touch
+                    if not ready_announced and ("about to IOCTL_BIOMETRIC_CAPTURE_DATA" in line or "PipeID=131" in line or "libusb_interrupt_transfer=-7!" in line):
+                        ready_announced = True
+                        if not quiet_mode:
+                            if lockscreen_mode:
+                                print(f"(Touch fingerprint sensor to authenticate as '{target_user}')", flush=True)
+                            elif compact_mode:
+                                print(f"[Fingerprint] Touch sensor to authenticate as '{target_user}'", flush=True)
+                            else:
+                                print(f"\n[Fingerprint Auth] >>> Place enrolled finger to authenticate as '{target_user}' <<<", flush=True)
+
+                    # Polling loop entered (-7! indicates sensor is actively awaiting finger touch on pipe 131)
+                    if ready_announced and "libusb_interrupt_transfer=-7!" in line:
+                        polling_armed = True
+
+                    # Physical contact detected: either transfer=0! after entering polling loop, or capture data arrived (sz=80)
+                    if ready_announced and not contact_detected and ("sz=80" in line or (polling_armed and "libusb_interrupt_transfer=0!" in line)):
+                        contact_detected = True
+                        if not quiet_mode and not lockscreen_mode:
+                            if compact_mode:
+                                print(f"[Fingerprint] Contact detected, scanning...", flush=True)
+                            else:
+                                print("[Fingerprint] Contact detected, scanning...", flush=True)
+
+                    # Check for on-chip template match
+                    matched_id = extract_matched_identity(line, all_identities)
+                    if matched_id:
+                        matched_identity = matched_id
+                        if matched_id in allowed_identities:
+                            success = True
+                        else:
+                            wrong_user_match = matched_id
+                        break
+
+                    # If no match occurred from on-chip comparison
+                    if "1f800980" in line or "WINBIO_E_NO_MATCH" in line:
+                        no_match_detected = True
+                        contact_detected = False
+                        can_retry = (attempt < max_attempts) and ((total_timeout - (time.time() - start_time)) > 4)
+                        if not quiet_mode:
+                            if can_retry:
+                                if lockscreen_mode:
+                                    print(f"Fingerprint not recognized. Adjust finger and try again...", flush=True)
+                                elif compact_mode:
+                                    print(f"[Fingerprint] Not recognized. Adjust finger and try again...", flush=True)
+                                else:
+                                    print("[Fingerprint] Not recognized. Adjust finger and try again...", flush=True)
+                            else:
+                                if lockscreen_mode:
+                                    print(f"Fingerprint not recognized. Adjust finger or use password.", flush=True)
+                                elif compact_mode:
+                                    print(f"[Fingerprint] Not recognized. Falling back to password...", flush=True)
+                                else:
+                                    print("[Fingerprint] Not recognized. Falling back to password...", flush=True)
+                        break
+
+            if proc and proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=2)
+                except Exception:
+                    proc.kill()
+
+        except Exception as e:
+            write_log(f"Exception during auth attempt {attempt}: {e}\n")
+        finally:
+            if proc and proc.poll() is None:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            try:
+                subprocess.run(["podman", "rm", "-f", container_name], env=clean_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=4)
+            except Exception:
+                pass
+
+        # If successfully matched or wrong user's finger matched, terminate session
+        if success or wrong_user_match:
+            break
+
+        # If no match was detected and we cannot retry, exit loop
+        if no_match_detected and ((attempt >= max_attempts) or ((total_timeout - (time.time() - start_time)) <= 4)):
+            break
 
     if success:
         if not quiet_mode:
