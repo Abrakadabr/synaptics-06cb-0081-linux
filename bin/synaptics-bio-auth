@@ -519,7 +519,14 @@ def main():
                 bufsize=1
             )
 
+            last_loop_t = time.time()
             while True:
+                now_t = time.time()
+                if now_t - last_loop_t > 2.0:
+                    write_log("System suspend/resume detected; breaking to re-initialize sensor hardware\n")
+                    break
+                last_loop_t = now_t
+
                 if time.time() - start_time > total_timeout:
                     write_log("Timeout waiting for fingerprint\n")
                     break
@@ -527,8 +534,8 @@ def main():
                 rlist, _, _ = select.select([proc.stdout], [], [], 0.5)
 
                 if lockscreen_mode:
-                    if os.getppid() == 1 or os.getppid() != initial_ppid or not is_screen_locked(uid):
-                        write_log("Session unlocked or parent exited, terminating lockscreen auth session\n")
+                    if os.getppid() == 1 or os.getppid() != initial_ppid:
+                        write_log("Parent process exited, terminating lockscreen auth session\n")
                         break
 
                 if not rlist:
@@ -544,11 +551,11 @@ def main():
                     write_log(line)
 
                     # Sensor is armed and actively waiting for finger touch
-                    if not ready_announced and ("about to IOCTL_BIOMETRIC_CAPTURE_DATA" in line or "PipeID=131" in line or "libusb_interrupt_transfer=-7!" in line):
+                    if not ready_announced and ("PipeID=131" in line or "libusb_interrupt_transfer=-7!" in line):
                         ready_announced = True
                         if not quiet_mode:
                             if lockscreen_mode:
-                                print(f"(Touch fingerprint sensor to authenticate as '{target_user}')", flush=True)
+                                print(f"[Fingerprint Auth] >>> Place enrolled finger to authenticate as '{target_user}' <<<", flush=True)
                             elif compact_mode:
                                 print(f"[Fingerprint] Touch sensor to authenticate as '{target_user}'", flush=True)
                             else:

@@ -63,11 +63,19 @@ rm -f "/etc/containers/storage.conf.d/99-synaptics-bio.conf"
 rm -f "/etc/containers/storage.rootless.conf.d/99-synaptics-bio.conf"
 echo "Removed multi-user container storage drop-ins."
 
-# 6. Remove CLI wrappers
+# 6. Remove CLI wrappers and sleep hook
 rm -f /usr/local/bin/synaptics-bio-auth
 rm -f /usr/local/bin/synaptics-bio-enroll
 rm -f /usr/local/bin/synaptics-bio-delete
-echo "Removed /usr/local/bin/synaptics-bio-auth, synaptics-bio-enroll, and synaptics-bio-delete."
+rm -f /usr/lib/systemd/system-sleep/synaptics-bio-sleep
+echo "Removed /usr/local/bin/synaptics-bio-auth, synaptics-bio-enroll, synaptics-bio-delete, and sleep hook."
+
+# Restore KDE lockscreen QML
+LOCKSCREEN_QML="/usr/share/plasma/shells/org.kde.plasma.desktop/contents/lockscreen/LockScreenUi.qml"
+if [ -f "${LOCKSCREEN_QML}.orig-bio" ]; then
+    mv "${LOCKSCREEN_QML}.orig-bio" "${LOCKSCREEN_QML}"
+    echo "Restored ${LOCKSCREEN_QML} from backup."
+fi
 
 # 7. Clean /opt/synaptics-bio
 OPT_DIR="/opt/synaptics-bio"
