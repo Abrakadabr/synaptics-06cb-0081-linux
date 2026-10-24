@@ -217,17 +217,16 @@ def main():
         except Exception:
             pass
 
-        # Relocate multi-user drop-in to rootless.conf.d if placed in storage.conf.d (prevents root graphroot deadlock)
-        bad_conf = "/etc/containers/storage.conf.d/99-synaptics-bio.conf"
-        rootless_dir = "/etc/containers/storage.rootless.conf.d"
-        rootless_conf = os.path.join(rootless_dir, "99-synaptics-bio.conf")
-        if os.path.exists(bad_conf):
-            try:
-                os.makedirs(rootless_dir, exist_ok=True)
-                os.replace(bad_conf, rootless_conf)
-                os.chmod(rootless_conf, 0o644)
-            except Exception:
-                pass
+        # Clean up any conflicting multi-user storage drop-ins that cause graphroot collisions
+        for bad_f in [
+            "/etc/containers/storage.conf.d/99-synaptics-bio.conf",
+            "/etc/containers/storage.rootless.conf.d/99-synaptics-bio.conf"
+        ]:
+            if os.path.exists(bad_f):
+                try:
+                    os.remove(bad_f)
+                except Exception:
+                    pass
 
     # Sanitize environment unconditionally to isolate Podman & Wine from user sessions
     clean_env = os.environ.copy()
