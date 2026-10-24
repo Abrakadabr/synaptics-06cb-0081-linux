@@ -72,9 +72,13 @@ echo "Removed /usr/local/bin/synaptics-bio-auth, synaptics-bio-enroll, synaptics
 
 # Restore KDE lockscreen QML
 LOCKSCREEN_QML="/usr/share/plasma/shells/org.kde.plasma.desktop/contents/lockscreen/LockScreenUi.qml"
-if [ -f "${LOCKSCREEN_QML}.orig-bio" ]; then
-    mv "${LOCKSCREEN_QML}.orig-bio" "${LOCKSCREEN_QML}"
-    echo "Restored ${LOCKSCREEN_QML} from backup."
+if [ -f "${LOCKSCREEN_QML}" ]; then
+    python3 "${SCRIPT_DIR}/scripts/patch-lockscreen.py" --revert "${LOCKSCREEN_QML}" 2>/dev/null || {
+        if [ -f "${LOCKSCREEN_QML}.orig-bio" ]; then
+            mv "${LOCKSCREEN_QML}.orig-bio" "${LOCKSCREEN_QML}"
+            echo "Restored ${LOCKSCREEN_QML} from backup."
+        fi
+    }
 fi
 
 # 7. Clean /opt/synaptics-bio
