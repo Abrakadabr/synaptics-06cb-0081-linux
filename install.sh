@@ -90,7 +90,7 @@ fi
 # Secure administrative ownership and permissions
 chown -R root:root "${OPT_DIR}"
 chmod 755 "${OPT_DIR}"
-chmod 644 "${OPT_DIR}/usb.txt" "${OPT_DIR}/.env" 2>/dev/null || true
+chmod 666 "${OPT_DIR}/usb.txt" "${OPT_DIR}/.env" 2>/dev/null || true
 [ -f "${OPT_DIR}/identities.json" ] && chmod 644 "${OPT_DIR}/identities.json"
 [ -f "${OPT_DIR}/CalibrationData.blob" ] && chmod 644 "${OPT_DIR}/CalibrationData.blob"
 chmod 755 "${OPT_DIR}"/*.dll "${OPT_DIR}"/*.exe 2>/dev/null || true

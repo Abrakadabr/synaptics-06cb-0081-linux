@@ -57,7 +57,7 @@ Confirmed working on laptops equipped with the Synaptics WBDI USB ID `06cb:0081`
 |   winusb.sys / libusb passthrough                                                 |
 +-----------+-----------------------------------------------------------------------+
             |
-            v  /dev/bus/usb/001/xxx (MODE 0660)
+            v  /dev/bus/usb/001/xxx (MODE 0666, TAG uaccess)
 +-----------------------------------------------------------------------------------+
 | Physical Silicon (Synaptics 06cb:0081 Match-on-Chip)                              |
 |                                                                                   |
