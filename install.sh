@@ -31,7 +31,7 @@ fi
 # 2. Prerequisites Check
 echo "[2/7] Checking system dependencies..."
 MISSING_PKGS=()
-for cmd in podman python3 lsusb; do
+for cmd in podman python3 lsusb fuse-overlayfs; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
         MISSING_PKGS+=("$cmd")
     fi
@@ -41,13 +41,13 @@ if [ ${#MISSING_PKGS[@]} -gt 0 ]; then
     echo "Missing required utilities: ${MISSING_PKGS[*]}"
     if command -v dnf >/dev/null 2>&1; then
         echo "Installing missing packages with DNF..."
-        dnf install -y podman python3 usbutils zstd
+        dnf install -y podman python3 usbutils zstd fuse-overlayfs
     elif command -v apt-get >/dev/null 2>&1; then
         echo "Installing missing packages with APT..."
-        apt-get update && apt-get install -y podman python3 usbutils zstd
+        apt-get update && apt-get install -y podman python3 usbutils zstd fuse-overlayfs
     elif command -v pacman >/dev/null 2>&1; then
         echo "Installing missing packages with Pacman..."
-        pacman -Sy --noconfirm podman python usbutils zstd
+        pacman -Sy --noconfirm podman python usbutils zstd fuse-overlayfs
     else
         echo "Please install ${MISSING_PKGS[*]} using your distribution package manager." >&2
         exit 1
@@ -129,6 +129,9 @@ cat << 'EOF' > "${CONF_DROPIN}"
 additionalimagestores = [
     "/usr/share/containers/storage"
 ]
+
+[storage.options.overlay]
+mount_program = "/usr/bin/fuse-overlayfs"
 EOF
 chmod 644 "${CONF_DROPIN}"
 rm -f /etc/containers/storage.rootless.conf.d/99-synaptics-bio.conf
@@ -143,6 +146,7 @@ udevadm trigger 2>/dev/null || true
 cp "${SCRIPT_DIR}/bin/synaptics-bio-auth" /usr/local/bin/synaptics-bio-auth
 cp "${SCRIPT_DIR}/bin/synaptics-bio-enroll" /usr/local/bin/synaptics-bio-enroll
 cp "${SCRIPT_DIR}/bin/synaptics-bio-delete" /usr/local/bin/synaptics-bio-delete
+chown root:root /usr/local/bin/synaptics-bio-auth /usr/local/bin/synaptics-bio-enroll /usr/local/bin/synaptics-bio-delete
 chmod 755 /usr/local/bin/synaptics-bio-auth /usr/local/bin/synaptics-bio-enroll /usr/local/bin/synaptics-bio-delete
 
 # Install systemd tmpfiles configuration to ensure /run lock and runtime paths exist after reboot

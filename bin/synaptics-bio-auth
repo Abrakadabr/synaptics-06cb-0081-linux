@@ -320,6 +320,10 @@ def main():
     initial_ppid = os.getppid()
     container_name = f"synaptics-bio-auth-{pid}"
 
+    podman_base = ["podman"]
+    if uid != 0 and os.path.exists("/usr/bin/fuse-overlayfs"):
+        podman_base.extend(["--storage-opt", "overlay.mount_program=/usr/bin/fuse-overlayfs"])
+
     # Sanitize environment unconditionally to isolate Podman & Wine from user sessions
     clean_env = os.environ.copy()
     for var in ["XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "XDG_SESSION_ID", "XDG_DATA_DIRS"]:
@@ -333,7 +337,7 @@ def main():
     def cleanup():
         release_hardware_lock(lock_fd)
         try:
-            subprocess.run(["podman", "rm", "-f", container_name],
+            subprocess.run(podman_base + ["rm", "-f", container_name],
                            env=clean_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
         except Exception:
             pass
@@ -386,6 +390,7 @@ def main():
         allowed_identities.add(target_user[:7])
         all_identities.add(target_user[:7])
 
+    unicorn_owner = None
     if os.path.exists(config_file):
         try:
             with open(config_file, "r") as f_cfg:
@@ -397,6 +402,8 @@ def main():
                 if len(u) > 7:
                     all_identities.add(u[:7])
                 if isinstance(aliases, list):
+                    if "Unicorn" in aliases and u != "alex":
+                        unicorn_owner = u
                     for a in aliases:
                         all_identities.add(a)
                         if len(a) > 7:
@@ -408,6 +415,11 @@ def main():
                         allowed_identities.add(alias[:7])
         except Exception:
             pass
+
+    if not unicorn_owner:
+        all_identities.add("Unicorn")
+        if target_user == "alex":
+            allowed_identities.add("Unicorn")
 
     # If running with root effective privileges under PAM, adopt full root credentials
     if os.geteuid() == 0:
@@ -447,9 +459,8 @@ def main():
     if not quiet_mode:
         print(f"[Fingerprint] Sensor initializing for {target_user} (~5s)...", flush=True)
 
-    # 1. Clean up any stale wine/identify processes or lingering containers
+    # 1. Clean up any stale wine/identify processes
     subprocess.run(["pkill", "-x", "identify.exe"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    subprocess.run(["podman", "rm", "-f", container_name], env=clean_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     # 2. Ensure USB device is awake (dynamically scan sysfs and disable autosuspend)
     ensure_usb_powered()
@@ -484,7 +495,7 @@ def main():
     image = "localhost/wine:validity"
     for candidate in image_candidates:
         try:
-            res = subprocess.run(["podman", "image", "exists", candidate], env=clean_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            res = subprocess.run(podman_base + ["image", "exists", candidate], env=clean_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             if res.returncode == 0:
                 image = candidate
                 break
@@ -509,12 +520,10 @@ def main():
 
         write_log(f"--- Scan Session Attempt {attempt}/{max_attempts} (Time remaining: {remaining:.1f}s) ---\n")
 
-        # Clean up any stale wine/identify processes or lingering containers
-        subprocess.run(["pkill", "-x", "identify.exe"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        subprocess.run(["podman", "rm", "-f", container_name], env=clean_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-        # On retries, give the USB bus and cryptoprocessor a brief moment to reset
+        # On retries, clean up previous container and give the USB bus a brief moment to reset
         if attempt > 1:
+            subprocess.run(["pkill", "-x", "identify.exe"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(podman_base + ["rm", "-f", container_name], env=clean_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             try:
                 subprocess.run(["usbreset", "06cb:0081"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
             except Exception:
@@ -527,8 +536,8 @@ def main():
             write_log("Device 06cb:0081 not found during retry\n")
             break
 
-        cmd = [
-            "podman", "run", "--rm",
+        cmd = podman_base + [
+            "run", "--rm",
             "--init",
             "--name", container_name,
             "--net=none",
@@ -540,9 +549,8 @@ def main():
             "-w", opt_dir,
             "-e", "USB_SCRIPT=/tmp/usb-trace.txt",
             "-v", f"{opt_dir}:{opt_dir}",
-            "-v", f"{opt_dir}/usb.txt:/root/.wine/drive_c/usb.txt",
             image,
-            "sh", "-c", "wine64 ./identify.exe identify"
+            "sh", "-c", f"mkdir -p /root/.wine/drive_c && cp {opt_dir}/usb.txt /root/.wine/drive_c/usb.txt && exec wine64 ./identify.exe identify"
         ]
 
         proc = None
@@ -660,7 +668,7 @@ def main():
                 except Exception:
                     pass
             try:
-                subprocess.run(["podman", "rm", "-f", container_name], env=clean_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=4)
+                subprocess.run(podman_base + ["rm", "-f", container_name], env=clean_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=4)
             except Exception:
                 pass
 
@@ -686,6 +694,11 @@ def main():
         write_log(f"Result: DENIED (Target: {target_user}, but matched: {wrong_user_match})\n")
         sys.exit(1)
     else:
+        if not quiet_mode and not no_match_detected:
+            if lockscreen_mode:
+                print("Fingerprint timeout or sensor unavailable. Adjust finger or use password.", flush=True)
+            else:
+                print("[Fingerprint] Sensor timeout or unavailable. Falling back to password...", flush=True)
         write_log(f"Result: FAIL/FALLBACK (Target: {target_user})\n")
         # On failure, recover sensor by clearing state if not aborted due to session unlock
         if not lockscreen_mode or is_screen_locked(uid):

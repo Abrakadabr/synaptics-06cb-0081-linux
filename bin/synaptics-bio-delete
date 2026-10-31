@@ -581,9 +581,8 @@ def main():
             "-w", opt_dir,
             "-e", f"USB_SCRIPT={trace_file}",
             "-v", f"{opt_dir}:{opt_dir}",
-            "-v", f"{opt_dir}/usb.txt:/root/.wine/drive_c/usb.txt",
             image,
-            "sh", "-c", f"wine64 ./{patched_exe_name}"
+            "sh", "-c", f"mkdir -p /root/.wine/drive_c && cp {opt_dir}/usb.txt /root/.wine/drive_c/usb.txt && exec wine64 ./{patched_exe_name}"
         ]
 
         proc = None

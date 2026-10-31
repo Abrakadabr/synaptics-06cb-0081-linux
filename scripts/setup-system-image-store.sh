@@ -62,6 +62,9 @@ cat << 'EOF' > "${CONF_DROPIN}"
 additionalimagestores = [
     "/usr/share/containers/storage"
 ]
+
+[storage.options.overlay]
+mount_program = "/usr/bin/fuse-overlayfs"
 EOF
 chmod 644 "${CONF_DROPIN}"
 
