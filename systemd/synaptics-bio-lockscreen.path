@@ -1,0 +1,11 @@
+[Unit]
+Description=Monitor KDE Plasma LockScreenUi.qml for package updates
+Documentation=https://github.com/abrakadabr/synaptics-06cb-0081-linux
+ConditionPathExists=/usr/share/plasma/shells/org.kde.plasma.desktop/contents/lockscreen/LockScreenUi.qml
+
+[Path]
+PathChanged=/usr/share/plasma/shells/org.kde.plasma.desktop/contents/lockscreen/LockScreenUi.qml
+Unit=synaptics-bio-lockscreen.service
+
+[Install]
+WantedBy=multi-user.target

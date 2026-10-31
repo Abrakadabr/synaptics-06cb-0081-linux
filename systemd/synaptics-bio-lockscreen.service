@@ -1,0 +1,11 @@
+[Unit]
+Description=Apply Synaptics Biometric Enhancements to KDE Plasma LockScreenUi.qml
+Documentation=https://github.com/abrakadabr/synaptics-06cb-0081-linux
+ConditionPathExists=/usr/share/plasma/shells/org.kde.plasma.desktop/contents/lockscreen/LockScreenUi.qml
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/synaptics-bio-patch-lockscreen --apply
+
+[Install]
+WantedBy=multi-user.target

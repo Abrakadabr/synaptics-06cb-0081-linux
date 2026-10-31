@@ -170,9 +170,17 @@ if [ -d "${SLEEP_HOOK_DIR}" ]; then
 fi
 
 # Configure KDE Plasma lockscreen UI message replacement and keepalive if present
+install -m 755 "${SCRIPT_DIR}/scripts/patch-lockscreen.py" /usr/local/bin/synaptics-bio-patch-lockscreen
 LOCKSCREEN_QML="/usr/share/plasma/shells/org.kde.plasma.desktop/contents/lockscreen/LockScreenUi.qml"
 if [ -f "${LOCKSCREEN_QML}" ]; then
-    python3 "${SCRIPT_DIR}/scripts/patch-lockscreen.py" --apply "${LOCKSCREEN_QML}" || true
+    /usr/local/bin/synaptics-bio-patch-lockscreen --apply "${LOCKSCREEN_QML}" || true
+fi
+if [ -d /etc/systemd/system ] && [ -d "${SCRIPT_DIR}/systemd" ]; then
+    install -m 644 "${SCRIPT_DIR}/systemd/synaptics-bio-lockscreen.service" /etc/systemd/system/synaptics-bio-lockscreen.service
+    install -m 644 "${SCRIPT_DIR}/systemd/synaptics-bio-lockscreen.path" /etc/systemd/system/synaptics-bio-lockscreen.path
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl enable --now synaptics-bio-lockscreen.path 2>/dev/null || true
+    systemctl enable synaptics-bio-lockscreen.service 2>/dev/null || true
 fi
 
 # 7. Configure PAM (sudo & KDE lock screen)

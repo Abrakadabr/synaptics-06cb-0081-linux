@@ -69,16 +69,21 @@ if [ -d "/usr/share/containers/storage" ]; then
 fi
 echo "Removed multi-user container storage drop-ins."
 
-# 6. Remove CLI wrappers, sleep hook, tmpfiles config, and locks
+# 6. Remove CLI wrappers, sleep hook, systemd watcher, tmpfiles config, and locks
+systemctl disable --now synaptics-bio-lockscreen.path synaptics-bio-lockscreen.service 2>/dev/null || true
+rm -f /etc/systemd/system/synaptics-bio-lockscreen.path
+rm -f /etc/systemd/system/synaptics-bio-lockscreen.service
+systemctl daemon-reload 2>/dev/null || true
 rm -f /usr/local/bin/synaptics-bio-auth
 rm -f /usr/local/bin/synaptics-bio-enroll
 rm -f /usr/local/bin/synaptics-bio-delete
+rm -f /usr/local/bin/synaptics-bio-patch-lockscreen
 rm -f /etc/systemd/system-sleep/synaptics-bio-sleep
 rm -f /usr/lib/systemd/system-sleep/synaptics-bio-sleep
 rm -f /etc/tmpfiles.d/synaptics-bio.conf
 rm -f /run/lock/synaptics-bio.lock /run/lock/synaptics-bio.meta
 rm -rf /run/synaptics-bio
-echo "Removed CLI tools, sleep hooks, and tmpfiles configuration."
+echo "Removed CLI tools, sleep hooks, systemd units, and tmpfiles configuration."
 
 # Restore KDE lockscreen QML
 LOCKSCREEN_QML="/usr/share/plasma/shells/org.kde.plasma.desktop/contents/lockscreen/LockScreenUi.qml"
