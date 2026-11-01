@@ -308,6 +308,12 @@ def main():
     except Exception:
         pass
 
+    # If system suspend/resume is in progress, wait until post-resume usbreset finishes
+    for _ in range(50):
+        if not os.path.exists("/run/synaptics-bio/suspending"):
+            break
+        time.sleep(0.2)
+
     # Acquire hardware mutex lock to prevent concurrent sensor access collisions
     auth_mode = "lockscreen" if lockscreen_mode else "interactive"
     lock_fd = acquire_hardware_lock(mode=auth_mode)
@@ -575,6 +581,12 @@ def main():
                 now_t = time.time()
                 if now_t - last_loop_t > 2.0:
                     write_log("System suspend/resume detected; breaking to re-initialize sensor hardware\n")
+                    for _ in range(50):
+                        if not os.path.exists("/run/synaptics-bio/suspending"):
+                            break
+                        time.sleep(0.2)
+                    start_time = time.time()
+                    attempt = max(0, attempt - 1)
                     break
                 last_loop_t = now_t
 

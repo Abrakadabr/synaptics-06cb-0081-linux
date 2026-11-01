@@ -173,7 +173,7 @@ fi
 install -m 755 "${SCRIPT_DIR}/scripts/patch-lockscreen.py" /usr/local/bin/synaptics-bio-patch-lockscreen
 LOCKSCREEN_QML="/usr/share/plasma/shells/org.kde.plasma.desktop/contents/lockscreen/LockScreenUi.qml"
 if [ -f "${LOCKSCREEN_QML}" ]; then
-    /usr/local/bin/synaptics-bio-patch-lockscreen --apply "${LOCKSCREEN_QML}" || true
+    /usr/local/bin/synaptics-bio-patch-lockscreen --apply --force "${LOCKSCREEN_QML}" || true
 fi
 if [ -d /etc/systemd/system ] && [ -d "${SCRIPT_DIR}/systemd" ]; then
     install -m 644 "${SCRIPT_DIR}/systemd/synaptics-bio-lockscreen.service" /etc/systemd/system/synaptics-bio-lockscreen.service
@@ -201,7 +201,43 @@ if [ -f "${PAM_SUDO}" ]; then
 fi
 
 PAM_KDE="/etc/pam.d/kde"
-if [ -f "${PAM_KDE}" ]; then
+PAM_KDE_FP="/etc/pam.d/kde-fingerprint"
+if [ -f "${PAM_KDE_FP}" ]; then
+    # On KDE Plasma 6 with split kde-fingerprint PAM service, keep /etc/pam.d/kde strictly for
+    # interactive password-auth so password entry always works immediately in parallel with fingerprint.
+    if [ -f "${PAM_KDE}" ] && grep -q "synaptics-bio-auth" "${PAM_KDE}"; then
+        if [ -f "${PAM_KDE}.orig-bio" ]; then
+            mv "${PAM_KDE}.orig-bio" "${PAM_KDE}"
+        else
+            sed -i '/synaptics-bio-auth/d' "${PAM_KDE}"
+        fi
+        echo "Restored ${PAM_KDE} to pure password-auth (migrated lockscreen biometric auth to ${PAM_KDE_FP})."
+    fi
+    if [ ! -f "${PAM_KDE_FP}.orig-bio" ] && ! grep -q "synaptics-bio-auth" "${PAM_KDE_FP}"; then
+        cp "${PAM_KDE_FP}" "${PAM_KDE_FP}.orig-bio"
+    fi
+    cat << 'EOF' > "${PAM_KDE_FP}"
+auth        required      pam_env.so
+auth        sufficient    pam_exec.so quiet stdout /usr/local/bin/synaptics-bio-auth --lockscreen
+auth        required      pam_deny.so
+auth        include       postlogin
+
+account     required      pam_nologin.so
+account     include       fingerprint-auth
+
+password    include       fingerprint-auth
+
+session     required      pam_selinux.so close
+session     required      pam_loginuid.so
+session     required      pam_selinux.so open
+session     optional      pam_keyinit.so force revoke
+session     required      pam_namespace.so
+session     include       fingerprint-auth
+session     include       postlogin
+EOF
+    chmod 644 "${PAM_KDE_FP}"
+    echo "Configured ${PAM_KDE_FP} (backup: ${PAM_KDE_FP}.orig-bio)."
+elif [ -f "${PAM_KDE}" ]; then
     if ! grep -q "synaptics-bio-auth" "${PAM_KDE}"; then
         cp "${PAM_KDE}" "${PAM_KDE}.orig-bio"
         if grep -q "password-auth" "${PAM_KDE}"; then

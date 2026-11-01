@@ -28,7 +28,7 @@ if [ -f "${PAM_SUDO}" ]; then
     fi
 fi
 
-# 2. Restore PAM KDE
+# 2. Restore PAM KDE & KDE Fingerprint
 PAM_KDE="/etc/pam.d/kde"
 if [ -f "${PAM_KDE}" ]; then
     if [ -f "${PAM_KDE}.orig-bio" ]; then
@@ -37,6 +37,17 @@ if [ -f "${PAM_KDE}" ]; then
     else
         sed -i '/synaptics-bio-auth/d' "${PAM_KDE}"
         echo "Removed synaptics-bio-auth rule from ${PAM_KDE}."
+    fi
+fi
+
+PAM_KDE_FP="/etc/pam.d/kde-fingerprint"
+if [ -f "${PAM_KDE_FP}" ]; then
+    if [ -f "${PAM_KDE_FP}.orig-bio" ]; then
+        mv "${PAM_KDE_FP}.orig-bio" "${PAM_KDE_FP}"
+        echo "Restored ${PAM_KDE_FP} from original backup."
+    else
+        sed -i '/synaptics-bio-auth/d' "${PAM_KDE_FP}"
+        echo "Removed synaptics-bio-auth rule from ${PAM_KDE_FP}."
     fi
 fi
 

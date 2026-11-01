@@ -37,17 +37,13 @@ session    required     pam_limits.so
 session    include      system-auth
 ```
 
-### B. KDE Plasma Lock Screen (`/etc/pam.d/kde`)
-Place the rule right before `password-auth` (use `--lockscreen` to present a single clean prompt when the sensor is armed, avoiding startup noise or multi-line stacking):
+### B. KDE Plasma 6 Lock Screen (`/etc/pam.d/kde-fingerprint`)
+KDE Plasma 6 runs two parallel `kscreenlocker_worker` PAM sessions: `/etc/pam.d/kde` (interactive password) and `/etc/pam.d/kde-fingerprint` (non-interactive fingerprint). Keep `/etc/pam.d/kde` as pure `password-auth` so typed passwords are accepted immediately at any time, and configure `/etc/pam.d/kde-fingerprint` with `--lockscreen`:
 ```pam
-#%PAM-1.0
-auth       sufficient   pam_exec.so quiet stdout /usr/local/bin/synaptics-bio-auth --lockscreen
-auth       substack     password-auth
-auth       optional     pam_kwallet5.so
-auth       optional     pam_kwallet.so
-account    include      password-auth
-password   include      password-auth
-session    include      password-auth
+auth        required      pam_env.so
+auth        sufficient    pam_exec.so quiet stdout /usr/local/bin/synaptics-bio-auth --lockscreen
+auth        required      pam_deny.so
+auth        include       postlogin
 ```
 
 ### C. KDE GUI Password Popups / Polkit (`/etc/pam.d/polkit-1`)

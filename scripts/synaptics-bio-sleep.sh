@@ -4,6 +4,10 @@
 
 case "$1/$2" in
     pre/*)
+        # Mark suspend in progress so newly spawned auth helpers wait until post-resume usbreset completes
+        mkdir -p /run/synaptics-bio 2>/dev/null || true
+        chmod 0777 /run/synaptics-bio 2>/dev/null || true
+        touch /run/synaptics-bio/suspending 2>/dev/null || true
         # Terminate any running biometric helper or container before suspend
         pkill -x identify.exe 2>/dev/null || true
         pkill -f /usr/local/bin/synaptics-bio-auth 2>/dev/null || true
@@ -28,5 +32,6 @@ case "$1/$2" in
         chmod 0777 /run/synaptics-bio 2>/dev/null || true
         touch /run/lock/synaptics-bio.lock 2>/dev/null && chmod 0666 /run/lock/synaptics-bio.lock 2>/dev/null || true
         /usr/bin/usbreset 06cb:0081 2>/dev/null || true
+        rm -f /run/synaptics-bio/suspending 2>/dev/null || true
         ;;
 esac

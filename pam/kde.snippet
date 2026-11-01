@@ -1,5 +1,7 @@
-# /etc/pam.d/kde integration snippet (KDE Plasma Lock Screen)
-# Insert before "auth substack password-auth"
-auth       sufficient   pam_exec.so quiet stdout /usr/local/bin/synaptics-bio-auth --lockscreen
+# /etc/pam.d/kde-fingerprint integration snippet (KDE Plasma 6 Non-Interactive Lock Screen Stack)
+# Keep /etc/pam.d/kde as pure password-auth so password entry works in parallel at all times.
+auth        required      pam_env.so
+auth        sufficient    pam_exec.so quiet stdout /usr/local/bin/synaptics-bio-auth --lockscreen
+auth        required      pam_deny.so
 
 
