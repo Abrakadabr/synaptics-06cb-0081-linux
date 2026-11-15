@@ -14,38 +14,66 @@ import fcntl
 import pwd
 import signal
 import select
+import struct
 import atexit
 
 RUN_BIO_DIR = "/run/synaptics-bio"
 
 def get_lock_paths():
     """
-    Returns (lock_path, meta_path) ensuring the target directory is writable by both root
-    and unprivileged desktop sessions (e.g. KDE Plasma lockscreen).
+    Returns (lock_path, meta_path) inside a root-owned 0755 runtime directory
+    with pre-created 0666 lock/meta regular files so unprivileged desktop sessions
+    cannot unlink, symlink, or forge root control flags.
     """
-    try:
-        os.makedirs(RUN_BIO_DIR, exist_ok=True)
+    lock_f = os.path.join(RUN_BIO_DIR, "lock")
+    meta_f = os.path.join(RUN_BIO_DIR, "meta")
+    uid = os.geteuid()
+
+    if uid == 0:
         try:
-            os.chmod(RUN_BIO_DIR, 0o777)
+            os.makedirs(RUN_BIO_DIR, mode=0o755, exist_ok=True)
+            os.chmod(RUN_BIO_DIR, 0o755)
+            for p in (lock_f, meta_f):
+                if os.path.islink(p):
+                    os.unlink(p)
+                fd_num = os.open(p, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o666)
+                try:
+                    os.fchmod(fd_num, 0o666)
+                    os.fchown(fd_num, 0, 0)
+                finally:
+                    os.close(fd_num)
+            return lock_f, meta_f
         except Exception:
             pass
-    except Exception:
-        pass
+    else:
+        try:
+            if (
+                os.path.isdir(RUN_BIO_DIR)
+                and not os.path.islink(lock_f)
+                and not os.path.islink(meta_f)
+                and os.path.isfile(lock_f)
+                and os.path.isfile(meta_f)
+                and os.access(lock_f, os.W_OK)
+                and os.access(meta_f, os.W_OK)
+            ):
+                return lock_f, meta_f
+        except Exception:
+            pass
 
-    if os.path.isdir(RUN_BIO_DIR) and os.access(RUN_BIO_DIR, os.W_OK):
-        return os.path.join(RUN_BIO_DIR, "lock"), os.path.join(RUN_BIO_DIR, "meta")
-
-    # Fallback to system /run/lock
-    lock_f = "/run/lock/synaptics-bio.lock"
-    meta_f = "/run/lock/synaptics-bio.meta"
+    # Fallback to system /run/lock only if pre-created and writable
+    fallback_lock = "/run/lock/synaptics-bio.lock"
+    fallback_meta = "/run/lock/synaptics-bio.meta"
     try:
-        if os.path.exists(lock_f) and os.access(lock_f, os.W_OK):
-            return lock_f, meta_f
+        if (
+            os.path.isfile(fallback_lock)
+            and not os.path.islink(fallback_lock)
+            and os.access(fallback_lock, os.W_OK)
+        ):
+            return fallback_lock, fallback_meta
     except Exception:
         pass
 
-    # If unprivileged user cannot write to /run/lock or /run/synaptics-bio, fallback to user runtime dir
-    uid = os.geteuid()
+    # Fallback to per-user runtime dir
     user_run = f"/run/user/{uid}"
     if os.path.isdir(user_run) and os.access(user_run, os.W_OK):
         return os.path.join(user_run, "synaptics-bio.lock"), os.path.join(user_run, "synaptics-bio.meta")
@@ -56,16 +84,17 @@ def is_screen_locked(uid=None):
     """
     Check if the desktop session is currently locked via kscreenlocker or loginctl.
     """
+    if uid is None:
+        uid = os.geteuid()
     try:
-        res = subprocess.run(["pgrep", "-x", "kscreenlocker_g"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        cmd = ["pgrep", "-u", str(uid), "-x", "kscreenlocker_g"] if uid != 0 else ["pgrep", "-x", "kscreenlocker_g"]
+        res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         if res.returncode == 0:
             return True
     except Exception:
         pass
 
     try:
-        if uid is None:
-            uid = os.geteuid()
         cmd = ["loginctl", "show-user", str(uid), "-p", "Display", "--value"]
         display_session = subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL).strip()
         if display_session:
@@ -85,6 +114,22 @@ def get_proc_ppid(pid):
     except Exception:
         return None
 
+def is_lockscreen_auth_process(pid):
+    """Verify via kernel-owned /proc/<pid>/cmdline that pid is synaptics-bio-auth --lockscreen."""
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            args = [a.decode("utf-8", errors="ignore") for a in f.read().split(b"\x00") if a]
+        if not args:
+            return False
+        has_auth = any(os.path.basename(a) == "synaptics-bio-auth" for a in args)
+        return has_auth and "--lockscreen" in args
+    except Exception:
+        return False
+
+def _can_create_lock_file(path):
+    uid = os.geteuid()
+    return uid == 0 or path.startswith(f"/run/user/{uid}/")
+
 def acquire_hardware_lock(mode="interactive", timeout=2.5):
     """
     Acquires an exclusive flock on the hardware lockfile to prevent concurrent
@@ -95,43 +140,50 @@ def acquire_hardware_lock(mode="interactive", timeout=2.5):
     lock_path, meta_path = get_lock_paths()
     start_t = time.time()
     while True:
+        fd = None
         try:
-            fd = open(lock_path, "a+")
-            try:
-                os.chmod(lock_path, 0o666)
-            except Exception:
-                pass
+            flags = os.O_RDWR | os.O_NOFOLLOW
+            if _can_create_lock_file(lock_path):
+                flags |= os.O_CREAT
+            fd_num = os.open(lock_path, flags, 0o666)
+            fd = os.fdopen(fd_num, "r+")
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            # Lock acquired! Record metadata
+            # Lock acquired! Record metadata in-place (preserving root-owned 0666 file)
             try:
-                meta_tmp = f"{meta_path}.tmp.{os.getpid()}"
-                with open(meta_tmp, "w") as fm:
-                    json.dump({"pid": os.getpid(), "mode": mode, "time": time.time()}, fm)
-                try:
-                    os.chmod(meta_tmp, 0o666)
-                except Exception:
-                    pass
-                os.replace(meta_tmp, meta_path)
+                mflags = os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW
+                if _can_create_lock_file(meta_path):
+                    mflags |= os.O_CREAT
+                mfd = os.open(meta_path, mflags, 0o666)
+                with os.fdopen(mfd, "w") as fm:
+                    json.dump({"pid": os.getpid(), "uid": os.geteuid(), "mode": mode, "time": time.time()}, fm)
             except Exception:
                 pass
             return fd
         except (BlockingIOError, OSError):
-            pass
+            if fd is not None:
+                try:
+                    fd.close()
+                except Exception:
+                    pass
 
         # If lock couldn't be acquired, inspect current holder
         holder_pid = None
+        holder_uid = None
         holder_mode = None
-        if os.path.exists(meta_path):
-            try:
-                with open(meta_path, "r") as fm:
-                    meta = json.load(fm)
-                    holder_pid = meta.get("pid")
-                    holder_mode = meta.get("mode")
-            except Exception:
-                pass
+        try:
+            mfd = os.open(meta_path, os.O_RDONLY | os.O_NOFOLLOW)
+            with os.fdopen(mfd, "r") as fm:
+                raw_meta = fm.read().strip()
+            if raw_meta:
+                meta = json.loads(raw_meta)
+                holder_pid = meta.get("pid")
+                holder_uid = meta.get("uid")
+                holder_mode = meta.get("mode")
+        except Exception:
+            pass
 
         holder_alive = False
-        if holder_pid and holder_pid != os.getpid():
+        if isinstance(holder_pid, int) and holder_pid > 1 and holder_pid != os.getpid():
             try:
                 os.kill(holder_pid, 0)
                 holder_alive = True
@@ -142,10 +194,10 @@ def acquire_hardware_lock(mode="interactive", timeout=2.5):
             time.sleep(0.1)
         else:
             should_preempt = False
-            if holder_mode == "lockscreen":
+            if holder_mode == "lockscreen" and is_lockscreen_auth_process(holder_pid):
                 if mode != "lockscreen":
                     should_preempt = True
-                elif get_proc_ppid(holder_pid) == 1 or not is_screen_locked():
+                elif get_proc_ppid(holder_pid) == 1 or not is_screen_locked(holder_uid):
                     should_preempt = True
 
             if should_preempt:
@@ -181,14 +233,15 @@ def release_hardware_lock(lock_fd):
     if lock_fd:
         try:
             _, meta_path = get_lock_paths()
-            if os.path.exists(meta_path):
-                try:
-                    with open(meta_path, "r") as fm:
-                        meta = json.load(fm)
-                    if meta.get("pid") == os.getpid():
-                        os.remove(meta_path)
-                except Exception:
-                    pass
+            try:
+                mfd = os.open(meta_path, os.O_RDONLY | os.O_NOFOLLOW)
+                with os.fdopen(mfd, "r") as fm:
+                    raw_meta = fm.read().strip()
+                if raw_meta and json.loads(raw_meta).get("pid") == os.getpid():
+                    tfd = os.open(meta_path, os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW)
+                    os.close(tfd)
+            except Exception:
+                pass
             fcntl.flock(lock_fd, fcntl.LOCK_UN)
             lock_fd.close()
         except Exception:
@@ -228,43 +281,41 @@ def extract_matched_identity(line, all_identities=None):
     Extracts the biometric identity string from decrypted WinUSB trace logs
     or driver response buffers.
     Format: Decrypted: <hex string>
-    The on-chip Match-on-Sensor returns a WINBIO_ID packet with Type=3 (SID),
-    containing signature \x08\x00\x03\x00 (packet type 8 = match result, type 3 = SID).
+    The on-chip Match-on-Sensor returns a WINBIO_ID match result packet containing
+    signature \x08\x00\x03\x00, identity-string subtype tag \x00\x01 at +8..+10,
+    little-endian length at +10..+12, and a null-terminated UTF-8 identity at +12.
     """
     if line.startswith("Decrypted:"):
         try:
             parts = line.split()
             if len(parts) >= 2:
                 raw_bytes = bytes.fromhex(parts[1])
-                # Check for Match Result signature: \x08\x00\x03\x00 (Type=8 Match, Subtype=3 SID)
+                # Check for Match Result signature: \x08\x00\x03\x00 with identity string tag \x00\x01
                 idx = raw_bytes.find(b'\x08\x00\x03\x00')
                 if idx != -1 and len(raw_bytes) >= idx + 12:
-                    id_len = int.from_bytes(raw_bytes[idx+10:idx+12], 'little')
-                    if 2 <= id_len <= 32 and len(raw_bytes) >= idx + 12 + id_len:
-                        ident = raw_bytes[idx+12:idx+12+id_len].rstrip(b'\x00').decode('utf-8', errors='ignore')
-                        if re.match(r'^[a-zA-Z0-9_\-\.]{2,32}$', ident):
-                            return ident
+                    if raw_bytes[idx+8:idx+10] == b'\x00\x01':
+                        id_len = int.from_bytes(raw_bytes[idx+10:idx+12], 'little')
+                        if 2 <= id_len <= 32 and len(raw_bytes) >= idx + 12 + id_len:
+                            raw_id = raw_bytes[idx+12:idx+12+id_len]
+                            if raw_id.endswith(b'\x00'):
+                                ident = raw_id.rstrip(b'\x00').decode('utf-8', errors='strict')
+                                if re.match(r'^[a-zA-Z0-9_\-\.]{1,32}$', ident):
+                                    return ident
         except Exception:
             pass
 
-        # Direct hex / string check for any known identity in decrypted line
-        if all_identities:
-            # Sort candidates by length descending to match longest identity first (avoid prefix collisions)
-            sorted_candidates = sorted(all_identities, key=len, reverse=True)
-            for candidate in sorted_candidates:
-                cand_hex = candidate.encode('utf-8').hex()
-                if cand_hex in line:
-                    return candidate
-
-    # Also check driver return buffer: Got back 0x888 bytes: ...
-    if "Got back 0x888 bytes:" in line and all_identities:
+    # Fallback: check structured length-prefixed driver return buffer (0x888 or 0x1890 bytes)
+    if ("Got back 0x888 bytes:" in line or "Got back 0x1890 bytes:" in line) and all_identities:
         try:
             hex_part = line.split("bytes:")[1].strip()
             raw_bytes = bytes.fromhex(hex_part)
             sorted_candidates = sorted(all_identities, key=len, reverse=True)
             for candidate in sorted_candidates:
                 cand_bytes = candidate.encode('utf-8')
-                if (cand_bytes + b'\x00') in raw_bytes or cand_bytes in raw_bytes:
+                null_len = len(cand_bytes) + 1
+                tag_pattern = b'\x00\x01' + struct.pack('<H', null_len) + cand_bytes + b'\x00'
+                qword_pattern = struct.pack('<Q', null_len) + cand_bytes + b'\x00'
+                if tag_pattern in raw_bytes or qword_pattern in raw_bytes:
                     return candidate
         except Exception:
             pass
@@ -327,15 +378,16 @@ def main():
     container_name = f"synaptics-bio-auth-{pid}"
 
     podman_base = ["podman"]
-    if uid != 0 and os.path.exists("/usr/bin/fuse-overlayfs"):
-        podman_base.extend(["--storage-opt", "overlay.mount_program=/usr/bin/fuse-overlayfs"])
 
     # Sanitize environment unconditionally to isolate Podman & Wine from user sessions
     clean_env = os.environ.copy()
     for var in ["XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "XDG_SESSION_ID", "XDG_DATA_DIRS"]:
         clean_env.pop(var, None)
         os.environ.pop(var, None)
-    clean_env["HOME"] = "/root" if os.geteuid() == 0 else os.path.expanduser("~")
+    try:
+        clean_env["HOME"] = "/root" if uid == 0 else pwd.getpwuid(uid).pw_dir
+    except Exception:
+        clean_env["HOME"] = "/root" if uid == 0 else os.path.expanduser("~")
     clean_env["PATH"] = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
     os.environ["HOME"] = clean_env["HOME"]
     os.environ["PATH"] = clean_env["PATH"]
@@ -493,6 +545,11 @@ def main():
             write_log("Error: /opt/synaptics-bio directory not found\n")
             sys.exit(1)
 
+    try:
+        os.chdir(opt_dir)
+    except Exception:
+        pass
+
     image_candidates = [
         "localhost/wine:validity",
         "wine:validity",
@@ -568,6 +625,7 @@ def main():
         try:
             proc = subprocess.Popen(
                 cmd,
+                cwd=opt_dir,
                 env=clean_env,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,

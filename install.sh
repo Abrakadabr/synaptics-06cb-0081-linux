@@ -152,14 +152,20 @@ chmod 755 /usr/local/bin/synaptics-bio-auth /usr/local/bin/synaptics-bio-enroll 
 # Install systemd tmpfiles configuration to ensure /run lock and runtime paths exist after reboot
 mkdir -p /etc/tmpfiles.d
 cat << 'EOF' > /etc/tmpfiles.d/synaptics-bio.conf
-d /run/synaptics-bio 0777 root root -
-f /run/lock/synaptics-bio.lock 0666 root root -
+d /run/synaptics-bio 0755 root root -
+f /run/synaptics-bio/lock 0666 root root -
+f /run/synaptics-bio/meta 0666 root root -
 EOF
 chmod 644 /etc/tmpfiles.d/synaptics-bio.conf
 mkdir -p /run/synaptics-bio
-chmod 0777 /run/synaptics-bio
-touch /run/lock/synaptics-bio.lock
-chmod 0666 /run/lock/synaptics-bio.lock
+chmod 0755 /run/synaptics-bio
+for f in /run/synaptics-bio/lock /run/synaptics-bio/meta; do
+    [ -L "$f" ] && rm -f "$f"
+    touch "$f"
+    chown root:root "$f"
+    chmod 0666 "$f"
+done
+rm -f /run/lock/synaptics-bio.lock /run/lock/synaptics-bio.meta
 
 # Install systemd suspend/resume hook to keep USB sensor healthy across sleep
 SLEEP_HOOK_DIR="/etc/systemd/system-sleep"

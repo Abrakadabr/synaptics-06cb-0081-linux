@@ -11,7 +11,27 @@ EXPECTED_ORIG_SHA256="543cc2d725b8c347b76150c763ca4f991f4f65ff53954518649686a517
 EXPECTED_ADAPTER_SHA256="3089ff398adb00841abf2f43982ce717a83c2c2f151c292fb110f3c231ccdfc3"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TARGET_DIR="${1:-/opt/synaptics-bio}"
+TARGET_DIR="/opt/synaptics-bio"
+ALLOW_UNVERIFIED=0
+
+for arg in "$@"; do
+    case "${arg}" in
+        --allow-unverified)
+            ALLOW_UNVERIFIED=1
+            ;;
+        -h|--help)
+            echo "Usage: $0 [target_dir] [--allow-unverified]"
+            exit 0
+            ;;
+        -*)
+            echo "Error: Unknown option '${arg}'." >&2
+            exit 1
+            ;;
+        *)
+            TARGET_DIR="${arg}"
+            ;;
+    esac
+done
 
 echo "=========================================================="
 echo "   Synaptics 06cb:0081 Windows UMDF Driver Setup"
@@ -71,11 +91,23 @@ ACTUAL_ORIG_SHA256="$(sha256sum "${SOURCE_DIR}/synaWudfBioUsb.dll" | awk '{print
 ACTUAL_ADAPTER_SHA256="$(sha256sum "${SOURCE_DIR}/synaAdvAdapter.dll" | awk '{print $1}')"
 
 if [ "${ACTUAL_ORIG_SHA256}" != "${EXPECTED_ORIG_SHA256}" ]; then
-    echo "Warning: synaWudfBioUsb.dll SHA256 (${ACTUAL_ORIG_SHA256}) differs from expected (${EXPECTED_ORIG_SHA256})."
+    if [ "${ALLOW_UNVERIFIED}" -eq 1 ]; then
+        echo "Warning: synaWudfBioUsb.dll SHA256 (${ACTUAL_ORIG_SHA256}) differs from expected (${EXPECTED_ORIG_SHA256}), continuing due to --allow-unverified." >&2
+    else
+        echo "Error: synaWudfBioUsb.dll SHA256 (${ACTUAL_ORIG_SHA256}) does not match expected (${EXPECTED_ORIG_SHA256})." >&2
+        echo "Refusing to patch/install an unverified binary. Pass --allow-unverified to override." >&2
+        exit 1
+    fi
 fi
 
 if [ "${ACTUAL_ADAPTER_SHA256}" != "${EXPECTED_ADAPTER_SHA256}" ]; then
-    echo "Warning: synaAdvAdapter.dll SHA256 (${ACTUAL_ADAPTER_SHA256}) differs from expected (${EXPECTED_ADAPTER_SHA256})."
+    if [ "${ALLOW_UNVERIFIED}" -eq 1 ]; then
+        echo "Warning: synaAdvAdapter.dll SHA256 (${ACTUAL_ADAPTER_SHA256}) differs from expected (${EXPECTED_ADAPTER_SHA256}), continuing due to --allow-unverified." >&2
+    else
+        echo "Error: synaAdvAdapter.dll SHA256 (${ACTUAL_ADAPTER_SHA256}) does not match expected (${EXPECTED_ADAPTER_SHA256})." >&2
+        echo "Refusing to install an unverified binary. Pass --allow-unverified to override." >&2
+        exit 1
+    fi
 fi
 
 cp -p "${SOURCE_DIR}/synaAdvAdapter.dll" "${TARGET_DIR}/synaAdvAdapter.dll"
