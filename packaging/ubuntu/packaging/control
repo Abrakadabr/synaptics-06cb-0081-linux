@@ -1,0 +1,13 @@
+Package: synatudor-0081
+Version: 0.1.0+git20260913.56dcd29-1ubuntu26.04.1
+Architecture: amd64
+Maintainer: Local Administrator <root@localhost>
+Section: non-free/misc
+Priority: optional
+Depends: bash, coreutils, dbus, dpkg, fprintd, grep, libc6, libcap2, libfprint-2-2 (>= 1:1.95.1+tod1), libfprint-2-tod1 (>= 1:1.95.1+tod1), libgcc-s1, libglib2.0-0t64, libgnutls30t64, libgusb2a, libjson-glib-1.0-0, libseccomp2, libssl3t64, libstdc++6, libusb-1.0-0, sudo | sudo-rs, systemd, udev, usbutils, util-linux
+Homepage: https://github.com/theaboutbox/synatudor-06cb-0081
+Description: Local Synaptics 06cb:0081 fingerprint driver for Ubuntu's TOD ABI
+ Connects fprintd to a sandboxed synaTudor host with the vendor's embedded
+ Windows fingerprint libraries. The resulting binary is for local use;
+ vendor components remain subject to their respective license terms.
+ Installation does not initialize the sensor, enroll prints, or configure PAM.

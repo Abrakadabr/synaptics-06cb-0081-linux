@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+# Build (do not install) a local binary package with the Ubuntu 26.04 toolchain.
+set -euo pipefail
+export LC_ALL=C TZ=UTC
+umask 022
+
+die() { printf 'build-deb: %s\n' "$*" >&2; exit 1; }
+[[ $# == 3 ]] || die 'usage: build-deb SOURCE_DIR LENOVO_EXE OUTPUT_DEB'
+(( EUID != 0 )) || die 'build as an ordinary user, not root'
+. /etc/os-release
+[[ $ID == ubuntu && $VERSION_ID == 26.04 && $(dpkg --print-architecture) == amd64 ]] ||
+    die 'this recipe targets native Ubuntu 26.04 amd64'
+
+recipe=$(dirname -- "$(realpath -e -- "$0")")
+source_dir=$(realpath -e -- "$1")
+installer=$(realpath -e -- "$2")
+output_dir=$(realpath -e -- "$(dirname -- "$3")")
+output=$output_dir/$(basename -- "$3")
+[[ -d $source_dir && -f $installer && -r $installer ]] || die 'source directory or installer not readable'
+[[ $output == *.deb && -d $output_dir && $output != "$source_dir/"* && ! -L $output ]] ||
+    die 'output must be a .deb outside the upstream tree, not a symlink'
+[[ ! -e $output || ( -f $output && ! $output -ef $installer ) ]] || die 'invalid output file'
+
+revision=56dcd295a5b6841324b4866a92ad22c890f19940
+installer_hash=2713966a9ce5906fce12d33ead81f8c15a72d7b1cbe4e523613147181ce32343
+# --no-optional-locks keeps even stat-cache refreshes out of the input checkout.
+git_src=(git --no-optional-locks --no-replace-objects -C "$source_dir")
+[[ $("${git_src[@]}" rev-parse --show-toplevel) == "$source_dir" &&
+   $("${git_src[@]}" rev-parse --verify HEAD) == "$revision" ]] || die "expected checkout of $revision"
+status=$("${git_src[@]}" status --porcelain=v1 --untracked-files=all --ignore-submodules=none)
+[[ -z $status ]] || die 'upstream checkout has staged, unstaged or untracked changes'
+hash=$(sha256sum < "$installer")
+[[ ${hash%% *} == "$installer_hash" ]] || die "wrong Lenovo installer; expected SHA-256 $installer_hash"
+
+work=$(mktemp -d /tmp/synatudor-build.XXXXXXXX)
+pending=
+cleanup() { rm -rf -- "$work"; if [[ -n $pending ]]; then rm -f -- "$pending"; fi; }
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+cd "$work"
+mkdir src root
+"${git_src[@]}" archive --format=tar "$revision" | tar -xf - -C src
+patch --batch --forward --fuzz=0 -d src -p1 < "$recipe/ubuntu-setup.patch"
+
+SOURCE_DATE_EPOCH=$("${git_src[@]}" show -s --format=%ct "$revision")
+export SOURCE_DATE_EPOCH SYNA_TUDOR_INSTALLER="$installer"
+export CFLAGS="${CFLAGS:+$CFLAGS }-ffile-prefix-map=$work=/usr/src/synatudor-0081"
+export CXXFLAGS="${CXXFLAGS:+$CXXFLAGS }-ffile-prefix-map=$work=/usr/src/synatudor-0081"
+libdir=lib/x86_64-linux-gnu
+tod=/usr/$libdir/libfprint-2/tod-1
+[[ $(pkg-config --variable=tod_driversdir libfprint-2-tod-1) == "$tod" ]] ||
+    die "Ubuntu libfprint-2-tod-dev must target $tod"
+meson setup build src --prefix=/usr --libdir="$libdir" --buildtype=release --strip \
+    --wrap-mode=nodownload -DDBGIMPORT=false -DDBGWDF=false -DUNMOUNTFS=true -DTOD=true
+meson compile -C build
+meson test -C build --print-errorlogs
+DESTDIR="$work/staged" meson install -C build --no-rebuild
+
+# Package an allowlist, not an upstream install script. The OS loader uses
+# the multiarch directory for libcryptbridge; the host uses $ORIGIN for
+# libtudor. Keep the unit's working directory / sandbox pivot root intact.
+host=/usr/bin/tudor
+bus=net.reactivated.TudorHostLauncher
+unit=tudor-host-launcher.service
+for path in "$host/tudor_host" "$host/tudor_host_launcher"; do
+    install -Dm755 "staged$path" "root$path"
+done
+for path in "$host/libtudor.so" "/usr/$libdir/libcryptbridge.so.1.0.0" \
+    "$tod/libtudor_tod.so" '/usr/lib/udev/rules.d/60-tudor-libfprint-tod.rules' \
+    "/usr/lib/systemd/system/$unit" "/usr/share/dbus-1/system.d/$bus.conf" \
+    "/usr/share/dbus-1/system-services/$bus.service"; do
+    install -Dm644 "staged$path" "root$path"
+done
+ln -s libcryptbridge.so.1.0.0 "root/usr/$libdir/libcryptbridge.so.1"
+
+# Reject build-machine library paths (including from externally supplied
+# linker flags) before installing an ELF into the root-activated service.
+for path in "$host/tudor_host" "$host/tudor_host_launcher" "$host/libtudor.so" \
+    "/usr/$libdir/libcryptbridge.so.1.0.0" "$tod/libtudor_tod.so"; do
+    dynamic=$(readelf -dW "root$path")
+    runpath=$(awk -F '[][]' '/\((RPATH|RUNPATH)\)/ { print $2 }' <<<"$dynamic")
+    if [[ $path == "$host/tudor_host" ]]; then
+        [[ $runpath == '$ORIGIN' ]] || die "unexpected library search path in $path: $runpath"
+    else
+        [[ -z $runpath ]] || die "unexpected library search path in $path: $runpath"
+    fi
+    if grep -Eq '\(NEEDED\).*\[[^]]*/' <<<"$dynamic"; then
+        die "non-system library path in $path"
+    fi
+done
+for helper in setup reset; do
+    install -Dm755 "src/scripts/$helper" "root/usr/bin/synatudor-$helper"
+done
+for doc in NOTICE LICENSE; do
+    install -Dm644 "src/$doc" "root/usr/share/doc/synatudor-0081/$doc"
+done
+install -Dm644 "$recipe/packaging/control" root/DEBIAN/control
+
+# dpkg-deb records root:root without fakeroot. Normalizing the mtimes also
+# covers older tar entries that dpkg's SOURCE_DATE_EPOCH clamping would keep.
+find root -depth -exec touch --no-dereference --date="@$SOURCE_DATE_EPOCH" {} +
+pending=$(mktemp -- "$output_dir/.synatudor-0081.XXXXXXXX.deb")
+dpkg-deb --root-owner-group -Zxz --build root "$pending"
+chmod 0644 "$pending"
+mv -fT -- "$pending" "$output"
+printf 'Built %s (not installed)\n' "$output"
