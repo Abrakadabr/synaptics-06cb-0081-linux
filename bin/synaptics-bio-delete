@@ -3,304 +3,32 @@
 # Fingerprint deletion and user unenrollment utility for Synaptics 06cb:0081 Match-on-Chip sensor
 # Supports deleting specific finger slots (1-10) or completely unenrolling user profiles from on-chip storage.
 
-import os
-import sys
-import subprocess
-import time
-import re
-import json
-import pwd
-import struct
-import glob
-import fcntl
-import signal
 import atexit
+import json
+import os
+import pwd
+import signal
+import subprocess
+import sys
+import time
 
-RUN_BIO_DIR = "/run/synaptics-bio"
 
-def get_lock_paths():
-    """
-    Returns (lock_path, meta_path) inside a root-owned 0755 runtime directory
-    with pre-created 0666 lock/meta regular files so unprivileged desktop sessions
-    cannot unlink, symlink, or forge root control flags.
-    """
-    lock_f = os.path.join(RUN_BIO_DIR, "lock")
-    meta_f = os.path.join(RUN_BIO_DIR, "meta")
-    uid = os.geteuid()
-
-    if uid == 0:
-        try:
-            os.makedirs(RUN_BIO_DIR, mode=0o755, exist_ok=True)
-            os.chmod(RUN_BIO_DIR, 0o755)
-            for p in (lock_f, meta_f):
-                if os.path.islink(p):
-                    os.unlink(p)
-                fd_num = os.open(p, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o666)
-                try:
-                    os.fchmod(fd_num, 0o666)
-                    os.fchown(fd_num, 0, 0)
-                finally:
-                    os.close(fd_num)
-            return lock_f, meta_f
-        except Exception:
-            pass
+def _load_common():
+    script_path = os.path.abspath(__file__)
+    if script_path.startswith("/usr/local/bin/") or script_path.startswith("/usr/bin/"):
+        search_dirs = ["/opt/synaptics-bio"]
     else:
-        try:
-            if (
-                os.path.isdir(RUN_BIO_DIR)
-                and not os.path.islink(lock_f)
-                and not os.path.islink(meta_f)
-                and os.path.isfile(lock_f)
-                and os.path.isfile(meta_f)
-                and os.access(lock_f, os.W_OK)
-                and os.access(meta_f, os.W_OK)
-            ):
-                return lock_f, meta_f
-        except Exception:
-            pass
+        repo_lib = os.path.join(os.path.dirname(os.path.dirname(script_path)), "lib")
+        search_dirs = [repo_lib, "/opt/synaptics-bio"]
+    for d in search_dirs:
+        if os.path.isdir(d) and d not in sys.path:
+            sys.path.insert(0, d)
 
-    fallback_lock = "/run/lock/synaptics-bio.lock"
-    fallback_meta = "/run/lock/synaptics-bio.meta"
-    try:
-        if (
-            os.path.isfile(fallback_lock)
-            and not os.path.islink(fallback_lock)
-            and os.access(fallback_lock, os.W_OK)
-        ):
-            return fallback_lock, fallback_meta
-    except Exception:
-        pass
 
-    user_run = f"/run/user/{uid}"
-    if os.path.isdir(user_run) and os.access(user_run, os.W_OK):
-        return os.path.join(user_run, "synaptics-bio.lock"), os.path.join(user_run, "synaptics-bio.meta")
+_load_common()
 
-    return lock_f, meta_f
+import synaptics_bio_common as bio  # noqa: E402
 
-def is_screen_locked(uid=None):
-    if uid is None:
-        uid = os.geteuid()
-    try:
-        cmd = ["pgrep", "-u", str(uid), "-x", "kscreenlocker_g"] if uid != 0 else ["pgrep", "-x", "kscreenlocker_g"]
-        res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        if res.returncode == 0:
-            return True
-    except Exception:
-        pass
-
-    try:
-        cmd = ["loginctl", "show-user", str(uid), "-p", "Display", "--value"]
-        display_session = subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL).strip()
-        if display_session:
-            cmd = ["loginctl", "show-session", display_session, "-p", "LockedHint", "--value"]
-            locked = subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL).strip()
-            if locked == "yes":
-                return True
-    except Exception:
-        pass
-
-    return False
-
-def get_proc_ppid(pid):
-    try:
-        with open(f"/proc/{pid}/stat", "r") as f:
-            return int(f.read().split()[3])
-    except Exception:
-        return None
-
-def is_lockscreen_auth_process(pid):
-    """Verify via kernel-owned /proc/<pid>/cmdline that pid is synaptics-bio-auth --lockscreen."""
-    try:
-        with open(f"/proc/{pid}/cmdline", "rb") as f:
-            args = [a.decode("utf-8", errors="ignore") for a in f.read().split(b"\x00") if a]
-        if not args:
-            return False
-        has_auth = any(os.path.basename(a) == "synaptics-bio-auth" for a in args)
-        return has_auth and "--lockscreen" in args
-    except Exception:
-        return False
-
-def _can_create_lock_file(path):
-    uid = os.geteuid()
-    return uid == 0 or path.startswith(f"/run/user/{uid}/")
-
-def acquire_hardware_lock(mode="interactive", timeout=3.0):
-    """
-    Acquires an exclusive flock on the hardware lockfile to prevent concurrent
-    hardware access collisions between multiple PAM / CLI callers.
-    Preempts orphaned lockscreen processes when interactive CLI calls arrive.
-    """
-    lock_path, meta_path = get_lock_paths()
-    start_t = time.time()
-    while True:
-        fd = None
-        try:
-            flags = os.O_RDWR | os.O_NOFOLLOW
-            if _can_create_lock_file(lock_path):
-                flags |= os.O_CREAT
-            fd_num = os.open(lock_path, flags, 0o666)
-            fd = os.fdopen(fd_num, "r+")
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            try:
-                mflags = os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW
-                if _can_create_lock_file(meta_path):
-                    mflags |= os.O_CREAT
-                mfd = os.open(meta_path, mflags, 0o666)
-                with os.fdopen(mfd, "w") as fm:
-                    json.dump({"pid": os.getpid(), "uid": os.geteuid(), "mode": mode, "time": time.time()}, fm)
-            except Exception:
-                pass
-            return fd
-        except (BlockingIOError, OSError):
-            if fd is not None:
-                try:
-                    fd.close()
-                except Exception:
-                    pass
-
-        holder_pid = None
-        holder_uid = None
-        holder_mode = None
-        try:
-            mfd = os.open(meta_path, os.O_RDONLY | os.O_NOFOLLOW)
-            with os.fdopen(mfd, "r") as fm:
-                raw_meta = fm.read().strip()
-            if raw_meta:
-                meta = json.loads(raw_meta)
-                holder_pid = meta.get("pid")
-                holder_uid = meta.get("uid")
-                holder_mode = meta.get("mode")
-        except Exception:
-            pass
-
-        holder_alive = False
-        if isinstance(holder_pid, int) and holder_pid > 1 and holder_pid != os.getpid():
-            try:
-                os.kill(holder_pid, 0)
-                holder_alive = True
-            except OSError:
-                holder_alive = False
-
-        if not holder_alive:
-            time.sleep(0.1)
-        else:
-            should_preempt = False
-            if holder_mode == "lockscreen" and is_lockscreen_auth_process(holder_pid):
-                if mode != "lockscreen":
-                    should_preempt = True
-                elif get_proc_ppid(holder_pid) == 1 or not is_screen_locked(holder_uid):
-                    should_preempt = True
-
-            if should_preempt:
-                try:
-                    os.kill(holder_pid, signal.SIGTERM)
-                except OSError:
-                    pass
-                clean_env = os.environ.copy()
-                subprocess.run(["podman", "rm", "-f", f"synaptics-bio-auth-{holder_pid}"],
-                               env=clean_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                subprocess.run(["pkill", "-x", "identify.exe"],
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                for _ in range(5):
-                    try:
-                        os.kill(holder_pid, 0)
-                        time.sleep(0.1)
-                    except OSError:
-                        break
-                else:
-                    try:
-                        os.kill(holder_pid, signal.SIGKILL)
-                    except OSError:
-                        pass
-                time.sleep(0.1)
-
-        if time.time() - start_t >= timeout:
-            return None
-        time.sleep(0.1)
-
-def release_hardware_lock(lock_fd):
-    if lock_fd:
-        try:
-            _, meta_path = get_lock_paths()
-            try:
-                mfd = os.open(meta_path, os.O_RDONLY | os.O_NOFOLLOW)
-                with os.fdopen(mfd, "r") as fm:
-                    raw_meta = fm.read().strip()
-                if raw_meta and json.loads(raw_meta).get("pid") == os.getpid():
-                    tfd = os.open(meta_path, os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW)
-                    os.close(tfd)
-            except Exception:
-                pass
-            fcntl.flock(lock_fd, fcntl.LOCK_UN)
-            lock_fd.close()
-        except Exception:
-            pass
-
-def ensure_usb_powered():
-    for p in glob.glob("/sys/bus/usb/devices/*"):
-        try:
-            with open(os.path.join(p, "idVendor")) as fv, open(os.path.join(p, "idProduct")) as fp:
-                if fv.read().strip() == "06cb" and fp.read().strip() == "0081":
-                    ctrl = os.path.join(p, "power", "control")
-                    if os.path.exists(ctrl):
-                        with open(ctrl, "w") as fc:
-                            fc.write("on\n")
-                    return
-        except (OSError, IOError):
-            continue
-
-def get_usb_dev_path():
-    try:
-        lsusb = subprocess.check_output(["lsusb"], text=True)
-    except Exception:
-        return None
-    for line in lsusb.splitlines():
-        if "06cb:0081" in line.lower() or ("synaptics" in line.lower() and "0081" in line.lower()):
-            m = re.search(r"Bus\s+(\d+)\s+Device\s+(\d+)", line)
-            if m:
-                return f"/dev/bus/usb/{m.group(1)}/{m.group(2)}"
-    return None
-
-def patch_delete_binary(src_path, dst_path, target_uid, finger_id=None):
-    """
-    Patches enroll.exe to invoke deleteRecord() (IOCTL 0x442034) instead of enroll().
-    - 0x3eb8: replace call enroll() with call deleteRecord()
-    - 0x2423..0x2427: patch target user RID (UID)
-    - 0x244a..0x244e: patch SubFactor (0xF4+slot for single finger, 0xFF for all fingers)
-    - 0x3eaa: patch Sleep(3000) -> NOP NOP
-    - 0x3ebd: patch jump to cleanup & return 0 (skipping Sleep(10000) and identify())
-    """
-    with open(src_path, "rb") as f:
-        data = bytearray(f.read())
-
-    # 1. Patch call in main() at 0x3eb8 from enroll() to deleteRecord()
-    # deleteRecord() is at VMA 0x402dd7; call instruction is at VMA 0x4048b8
-    rel_delete = 0x402dd7 - (0x4048b8 + 5)
-    data[0x3eb8:0x3ebd] = b"\xe8" + struct.pack("<i", rel_delete)
-
-    # 2. Patch target UID (RID) in deleteRecord() at 0x2423..0x2427
-    data[0x2423:0x2427] = struct.pack("<I", target_uid)
-
-    # 3. Patch SubFactor in deleteRecord() at 0x244a..0x244e
-    # Slot 1-10: 0xF4 + finger_id (0xF5..0xFE)
-    # All slots / unenroll: 0xFF (WINBIO_SUBTYPE_ANY)
-    if finger_id is None or finger_id == 0 or finger_id == 0xff:
-        subfactor = 0xff
-    else:
-        subfactor = 0xf4 + finger_id
-    data[0x244a:0x244e] = struct.pack("<I", subfactor)
-
-    # 4. Patch Sleep(3000) at 0x3eaa: ff d0 -> 90 90
-    if data[0x3eaa:0x3eac] == b"\xff\xd0":
-        data[0x3eaa:0x3eac] = b"\x90\x90"
-
-    # 5. Patch jump over Sleep(10000) + identify() at 0x3ebd: 90 90 -> eb 41
-    if data[0x3ebd:0x3ebf] == b"\x90\x90":
-        data[0x3ebd:0x3ebf] = b"\xeb\x41"
-
-    with open(dst_path, "wb") as f:
-        f.write(data)
-    os.chmod(dst_path, 0o755)
 
 def list_enrolled_profiles(opt_dir):
     cfg_file = os.path.join(opt_dir, "identities.json")
@@ -309,7 +37,7 @@ def list_enrolled_profiles(opt_dir):
         return
 
     try:
-        with open(cfg_file, "r") as f:
+        with open(cfg_file, "r", encoding="utf-8") as f:
             data = json.load(f)
     except Exception as e:
         print(f"Error reading {cfg_file}: {e}", file=sys.stderr)
@@ -335,54 +63,17 @@ def list_enrolled_profiles(opt_dir):
         slots = meta.get(user, {}).get("enrolled_fingers", [])
         slots_str = ", ".join(f"#{s}" for s in sorted(slots)) if slots else "None"
         aliases = data.get(user, [])
-        alias_str = ", ".join(aliases) if aliases else user
+        if aliases:
+            formatted = [f"{a} (on-chip: {a[:7]})" if len(a) > 7 else a for a in aliases]
+            alias_str = ", ".join(formatted)
+        else:
+            alias_str = user[:7] if len(user) > 7 else user
 
         print(f"User: {user} ({uid_str})")
         print(f"  Enrolled finger slots : {slots_str}")
-        print(f"  Hardware SID labels   : {alias_str}")
+        print(f"  Authorized identities : {alias_str}")
         print("----------------------------------------------------------")
 
-def update_identities_after_delete(opt_dir, target_user, finger_id=None):
-    cfg_file = os.path.join(opt_dir, "identities.json")
-    if not os.path.exists(cfg_file):
-        return
-
-    try:
-        with open(cfg_file, "r") as f:
-            data = json.load(f)
-    except Exception:
-        return
-
-    meta = data.get("_metadata", {})
-    user_meta = meta.get(target_user, {})
-    enrolled = user_meta.get("enrolled_fingers", [])
-
-    if finger_id is None or finger_id == 0 or finger_id == 0xff:
-        # Full unenrollment: remove user entirely
-        if target_user in meta:
-            del meta[target_user]
-        if target_user in data:
-            del data[target_user]
-    else:
-        # Single slot removal
-        if finger_id in enrolled:
-            enrolled.remove(finger_id)
-            user_meta["enrolled_fingers"] = sorted(enrolled)
-
-        if not enrolled:
-            # If no fingers remain for user, clean up user entries
-            if target_user in meta:
-                del meta[target_user]
-            if target_user in data:
-                del data[target_user]
-
-    try:
-        with open(cfg_file, "w") as f:
-            json.dump(data, f, indent=4)
-            f.write("\n")
-        os.chmod(cfg_file, 0o644)
-    except Exception as e:
-        print(f"Warning: could not update {cfg_file}: {e}", file=sys.stderr)
 
 def print_usage():
     print("Usage:")
@@ -407,6 +98,7 @@ def print_usage():
     print("  sudo synaptics-bio-delete kate --all")
     print("  sudo synaptics-bio-delete unenroll alex --force")
 
+
 def main():
     args = sys.argv[1:]
 
@@ -414,14 +106,10 @@ def main():
         print_usage()
         sys.exit(0)
 
-    opt_dir = "/opt/synaptics-bio"
-    if not os.path.isdir(opt_dir):
-        repo_opt = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "opt")
-        if os.path.isdir(repo_opt):
-            opt_dir = repo_opt
-        else:
-            print("Error: /opt/synaptics-bio directory not found.", file=sys.stderr)
-            sys.exit(1)
+    opt_dir = bio.resolve_opt_dir(__file__)
+    if not opt_dir:
+        print("Error: /opt/synaptics-bio directory not found.", file=sys.stderr)
+        sys.exit(1)
 
     if "-l" in args or "--list" in args:
         list_enrolled_profiles(opt_dir)
@@ -432,45 +120,51 @@ def main():
         print("Example: sudo synaptics-bio-delete kate 2", file=sys.stderr)
         sys.exit(1)
 
-    # Acquire hardware mutex lock
-    lock_fd = acquire_hardware_lock(mode="interactive")
-    if not lock_fd:
-        print("Error: Another biometric process is currently accessing the sensor. Please wait and try again.", file=sys.stderr)
-        sys.exit(1)
-
-    atexit.register(lambda: release_hardware_lock(lock_fd))
-
+    # Parse flags and positional arguments strictly before locking hardware
     force = False
-    if "-f" in args:
-        force = True
-        args.remove("-f")
-    if "--force" in args:
-        force = True
-        args.remove("--force")
-
     is_all = False
-    if "-a" in args:
-        is_all = True
-        args.remove("-a")
-    if "--all" in args:
-        is_all = True
-        args.remove("--all")
-    if "all" in args:
-        is_all = True
-        args.remove("all")
+    positional = []
+    for arg in args:
+        if arg in ("-f", "--force"):
+            force = True
+        elif arg in ("-a", "--all"):
+            is_all = True
+        elif arg.startswith("-"):
+            print(f"Error: Unknown option '{arg}'.", file=sys.stderr)
+            print_usage()
+            sys.exit(1)
+        else:
+            positional.append(arg)
 
-    if args and args[0] == "unenroll":
+    if positional and positional[0] == "unenroll":
         is_all = True
-        args.pop(0)
+        positional.pop(0)
+    elif "all" in positional and len(positional) >= 2:
+        is_all = True
+        positional.remove("all")
 
     target_user = None
     finger_id = None
 
-    for arg in args:
-        if arg.isdigit() and 1 <= int(arg) <= 10:
-            finger_id = int(arg)
-        elif not target_user:
+    for arg in positional:
+        if arg.isdigit():
+            val = int(arg)
+            if 1 <= val <= 10 and finger_id is None and target_user is not None:
+                finger_id = val
+            elif target_user is None and val > 10:
+                # Treat numeric >10 in first position as numeric UID
+                target_user = arg
+            elif target_user is not None:
+                print(f"Error: Finger slot must be between 1 and 10 (got '{arg}').", file=sys.stderr)
+                sys.exit(1)
+            else:
+                finger_id = val
+        elif target_user is None:
             target_user = arg
+        else:
+            print(f"Error: Unexpected argument '{arg}'.", file=sys.stderr)
+            print_usage()
+            sys.exit(1)
 
     if not target_user:
         target_user = os.environ.get("SUDO_USER") or os.environ.get("USER")
@@ -489,7 +183,6 @@ def main():
         user_info = pwd.getpwnam(target_user)
         target_uid = user_info.pw_uid
     except KeyError:
-        # Check if target_user is a numeric UID
         if target_user.isdigit():
             target_uid = int(target_user)
             try:
@@ -502,7 +195,7 @@ def main():
 
     if not is_all and finger_id is None:
         print(f"Error: Please specify a finger slot (1-10) or --all to unenroll '{target_user}'.", file=sys.stderr)
-        print(f"Run 'synaptics-bio-delete --list' to see enrolled slots.", file=sys.stderr)
+        print("Run 'synaptics-bio-delete --list' to see enrolled slots.", file=sys.stderr)
         sys.exit(1)
 
     # Check identities.json for existing registration
@@ -510,7 +203,7 @@ def main():
     enrolled_slots = []
     if os.path.exists(cfg_file):
         try:
-            with open(cfg_file, "r") as f:
+            with open(cfg_file, "r", encoding="utf-8") as f:
                 cdata = json.load(f)
             enrolled_slots = cdata.get("_metadata", {}).get(target_user, {}).get("enrolled_fingers", [])
         except Exception:
@@ -523,7 +216,7 @@ def main():
         else:
             print(f"User '{target_user}' currently has no enrolled finger slots recorded.")
 
-    # Interactive confirmation prompt
+    # Interactive confirmation prompt (before acquiring hardware lock)
     if not force:
         if is_all:
             prompt_msg = f"Are you sure you want to completely unenroll '{target_user}' and purge ALL templates from sensor? [y/N]: "
@@ -545,19 +238,50 @@ def main():
         print(f"Error: {base_enroll_exe} not found.", file=sys.stderr)
         sys.exit(1)
 
+    # Acquire hardware mutex lock
+    lock_fd = bio.acquire_hardware_lock(mode="interactive", timeout=3.0)
+    if not lock_fd:
+        print("Error: Another biometric process is currently accessing the sensor. Please wait and try again.", file=sys.stderr)
+        sys.exit(1)
+
     pid = os.getpid()
     container_name = f"synaptics-bio-delete-{pid}"
-    patched_exe_name = f"delete-{target_user}-{pid}.exe"
+    patched_exe_name = f"delete-{target_uid}-{pid}.exe"
     patched_exe_path = os.path.join(opt_dir, patched_exe_name)
     trace_file = f"usb-trace-{pid}.txt"
     trace_path = os.path.join(opt_dir, trace_file)
+    clean_env = bio.get_clean_env(0)
 
-    # Sanitize environment
-    clean_env = os.environ.copy()
-    for var in ["XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "XDG_SESSION_ID", "XDG_DATA_DIRS"]:
-        clean_env.pop(var, None)
-    clean_env["HOME"] = "/root"
-    clean_env["PATH"] = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    def cleanup():
+        try:
+            subprocess.run(
+                ["podman", "rm", "-f", container_name],
+                env=clean_env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=3,
+            )
+        except Exception:
+            pass
+        for tmp_f in (patched_exe_path, trace_path):
+            if os.path.exists(tmp_f):
+                try:
+                    os.remove(tmp_f)
+                except Exception:
+                    pass
+        bio.release_hardware_lock(lock_fd)
+
+    atexit.register(cleanup)
+
+    def sig_handler(signum, frame):
+        sys.exit(1)
+
+    signal.signal(signal.SIGTERM, sig_handler)
+    signal.signal(signal.SIGINT, sig_handler)
+    try:
+        signal.signal(signal.SIGHUP, sig_handler)
+    except Exception:
+        pass
 
     print("==========================================================")
     print("   Synaptics Fingerprint Deletion")
@@ -569,13 +293,13 @@ def main():
         print(f"Action      : Delete Finger Slot #{finger_id}")
     print("==========================================================")
 
-    # 1. Clean up any stale processes/containers
-    subprocess.run(["pkill", "-x", "identify.exe"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    subprocess.run(["pkill", "-x", "enroll.exe"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # 1. Clean up stale root-owned processes/containers
+    subprocess.run(["pkill", "-u", "0", "-x", "identify.exe"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(["pkill", "-u", "0", "-x", "enroll.exe"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     subprocess.run(["podman", "rm", "-f", container_name], env=clean_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     # 2. Disable USB autosuspend dynamically across sysfs
-    ensure_usb_powered()
+    bio.ensure_usb_powered()
 
     # 3. Reset USB device to ensure clean state
     print("[Fingerprint] Initializing sensor hardware...", flush=True)
@@ -585,58 +309,50 @@ def main():
         pass
     time.sleep(1.5)
 
-    # 4. Determine UIDs to purge on-chip
     uids_to_purge = [target_uid]
-
-    # Locate Podman container image
-    image_candidates = [
-        "localhost/wine:validity",
-        "wine:validity",
-        "ghcr.io/abrakadabr/synaptics-06cb-0081-linux:latest"
-    ]
-    image = "localhost/wine:validity"
-    for candidate in image_candidates:
-        try:
-            res = subprocess.run(["podman", "image", "exists", candidate], env=clean_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            if res.returncode == 0:
-                image = candidate
-                break
-        except Exception:
-            pass
-
+    image = bio.find_container_image(clean_env)
     deleted = False
 
-    for current_uid in uids_to_purge:
-        # Dynamically locate USB device node per-iteration after any potential usbreset re-enumeration
-        time.sleep(1.5)
-        dev_path = get_usb_dev_path()
+    for idx, current_uid in enumerate(uids_to_purge):
+        if idx > 0:
+            time.sleep(1.5)
+        dev_path = bio.get_usb_dev_path()
         if not dev_path or not os.path.exists(dev_path):
             time.sleep(1.0)
-            dev_path = get_usb_dev_path()
+            dev_path = bio.get_usb_dev_path()
         if not dev_path or not os.path.exists(dev_path):
             print("Error: Synaptics 06cb:0081 sensor not found on USB.", file=sys.stderr)
             break
 
-        patch_delete_binary(base_enroll_exe, patched_exe_path, current_uid, None if is_all else finger_id)
+        try:
+            bio.patch_delete_binary(base_enroll_exe, patched_exe_path, current_uid, None if is_all else finger_id)
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            break
 
         cmd = [
             "podman", "run", "--rm",
             "--init",
             "--name", container_name,
             "--net=none",
+            "--cap-drop=ALL",
             "--security-opt", "label=disable",
             "--device", dev_path,
-            "-v", "/dev/bus/usb:/dev/bus/usb",
             "-e", "WINEPATH=/usr/lib/gcc/x86_64-w64-mingw32/10-win32;/usr/x86_64-w64-mingw32/lib",
             "-e", "WINEDEBUG=fixme-all,err-all",
             "-w", opt_dir,
             "-e", f"USB_SCRIPT={trace_file}",
             "-v", f"{opt_dir}:{opt_dir}",
             image,
-            "sh", "-c", f"mkdir -p /root/.wine/drive_c && cp {opt_dir}/usb.txt /root/.wine/drive_c/usb.txt && exec wine64 ./{patched_exe_name}"
+            "sh", "-c",
+            'mkdir -p /root/.wine/drive_c && cp "$1/usb.txt" /root/.wine/drive_c/usb.txt && exec wine64 "./$2"',
+            "_", opt_dir, patched_exe_name,
         ]
 
         proc = None
+        saw_delete_ioctl = False
+        delete_complete_ok = False
+        delete_error_hr = None
         try:
             print(f"[Fingerprint] Sending deletion command to on-chip storage (UID/RID: {current_uid})...", flush=True)
             proc = subprocess.Popen(
@@ -646,14 +362,25 @@ def main():
                 stderr=subprocess.STDOUT,
                 text=True,
                 errors="replace",
-                bufsize=1
+                bufsize=1,
             )
 
             for line in proc.stdout:
-                if "Got back 0x" in line or "Complete: 0" in line:
-                    deleted = True
+                stripped = line.strip()
+                if "about to 442034" in stripped:
+                    saw_delete_ioctl = True
+                elif saw_delete_ioctl and stripped.startswith("Complete:"):
+                    if stripped == "Complete: 0":
+                        delete_complete_ok = True
+                    else:
+                        delete_error_hr = stripped
 
             proc.wait()
+
+            if saw_delete_ioctl and delete_complete_ok and proc.returncode == 0:
+                deleted = True
+            elif delete_error_hr:
+                print(f"[Fingerprint] Sensor returned error for delete IOCTL: {delete_error_hr}", file=sys.stderr)
 
         except KeyboardInterrupt:
             print("\n[Fingerprint] Deletion canceled by user.", flush=True)
@@ -671,25 +398,23 @@ def main():
                     except Exception:
                         pass
             subprocess.run(["podman", "rm", "-f", container_name], env=clean_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            if os.path.exists(patched_exe_path):
-                try:
-                    os.remove(patched_exe_path)
-                except Exception:
-                    pass
-            if os.path.exists(trace_path):
-                try:
-                    os.remove(trace_path)
-                except Exception:
-                    pass
+            for tmp_f in (patched_exe_path, trace_path):
+                if os.path.exists(tmp_f):
+                    try:
+                        os.remove(tmp_f)
+                    except Exception:
+                        pass
 
-        # Reset USB device so sensor is clean and immediately ready for PAM auth
         try:
             subprocess.run(["usbreset", "06cb:0081"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
         except Exception:
             pass
 
     if deleted:
-        update_identities_after_delete(opt_dir, target_user, None if is_all else finger_id)
+        try:
+            bio.update_identities_after_delete(opt_dir, target_user, None if is_all else finger_id)
+        except Exception as e:
+            print(f"Warning: could not update identities.json: {e}", file=sys.stderr)
         print("")
         print("==========================================================")
         if is_all:
@@ -703,6 +428,7 @@ def main():
     else:
         print("\n[Fingerprint] Hardware deletion command could not be completed.", file=sys.stderr)
         sys.exit(1)
+
 
 if __name__ == "__main__":
     main()

@@ -4,10 +4,13 @@
 
 FROM debian:bullseye AS builder
 
+ARG WINE_COMMIT=7a69a8274f50530a5665c5dc52810710e5e05f9a
+
 WORKDIR /root
 
 RUN sed -i 's|http://deb.debian.org/debian-security|http://archive.debian.org/debian-security|g' /etc/apt/sources.list && \
     apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
     git \
     build-essential \
     autoconf \
@@ -32,7 +35,11 @@ RUN sed -i 's|http://deb.debian.org/debian-security|http://archive.debian.org/de
     mingw-w64-common && \
     rm -rf /var/lib/apt/lists/*
 
-RUN git clone --depth 1 https://github.com/uunicorn/wine.git -b hacking/validiy-sensor wine
+RUN mkdir -p /root/wine && cd /root/wine && \
+    git init && \
+    git remote add origin https://github.com/uunicorn/wine.git && \
+    git fetch --depth 1 origin "${WINE_COMMIT}" && \
+    git checkout FETCH_HEAD
 
 WORKDIR /root/wine
 RUN ./configure \
@@ -44,27 +51,30 @@ RUN ./configure \
     --disable-tests \
     --enable-win64 \
     --enable-maintainer-mode \
-    CFLAGS='-g -O2 -fdebug-prefix-map=/root/wine=. -fno-stack-protector -Wformat -Werror=format-security -Wno-error -fcommon' \
+    CFLAGS='-O2 -fdebug-prefix-map=/root/wine=. -fno-stack-protector -Wformat -Werror=format-security -Wno-error -fcommon' \
     CPPFLAGS='-Wdate-time' \
-    CXXFLAGS='-g -O2 -fdebug-prefix-map=/root/wine=. -fno-stack-protector -Wformat -Werror=format-security' \
+    CXXFLAGS='-O2 -fdebug-prefix-map=/root/wine=. -fno-stack-protector -Wformat -Werror=format-security' \
     LDFLAGS='-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-rpath,/usr/lib/x86_64-linux-gnu/wine'
 
-RUN make -j$(nproc)
+RUN make -j"$(nproc)"
 RUN make DESTDIR=build install
 
-# Runtime container stage
+# Minimal runtime container stage
 FROM debian:bullseye-slim
-
-COPY --from=builder /root/wine/build/ /
-COPY --from=builder /usr/lib/gcc/x86_64-w64-mingw32 /usr/lib/gcc/x86_64-w64-mingw32
-COPY --from=builder /usr/lib/x86_64-linux-gnu /usr/lib/x86_64-linux-gnu
-COPY --from=builder /lib /lib
 
 RUN sed -i 's|http://deb.debian.org/debian-security|http://archive.debian.org/debian-security|g' /etc/apt/sources.list && \
     apt-get update && apt-get install -y --no-install-recommends \
     libusb-1.0-0 \
     libgnutls30 \
+    libssl1.1 \
+    libudev1 \
     ca-certificates && \
     rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /root/wine/build/ /
+COPY --from=builder /usr/lib/gcc/x86_64-w64-mingw32/10-win32/libstdc++-6.dll \
+                    /usr/lib/gcc/x86_64-w64-mingw32/10-win32/libgcc_s_seh-1.dll \
+                    /usr/lib/gcc/x86_64-w64-mingw32/10-win32/libssp-0.dll \
+                    /usr/lib/gcc/x86_64-w64-mingw32/10-win32/
 
 WORKDIR /root

@@ -61,14 +61,25 @@ The driver `synawudfbiousb.dll` interfaces with the Windows User-Mode Driver Fra
 
 ## 4. Multi-User Identity & Slot Mapping
 
-### On-Chip Identity Layout (`WINBIO_IDENTITY`)
-When the Match-on-Chip processor confirms a match, it emits a decrypted response packet:
+### On-Chip Identity Layout (`WINBIO_IDENTITY` & Payload Record)
+When the Match-on-Chip processor confirms a match:
 
+1. **Decrypted Payload Record (`Decrypted:` WinUSB trace):**
 ```
-[00..03] 08 00 03 00     Type 8 (Match Result), Subtype 3 (Windows SID)
-[04..07] SID Header      Revision, Authority (NT Authority = 5)
-[08..09] Length          Identity string length in bytes
-[10..nn] Identity String Target user string (e.g. "alex\0", "kate\0")
+[+00..+03] 08 00 03 00     Record Type 8 (Payload), Storage ID 3
+[+04..+07] Record Size     4-byte little-endian total record length
+[+08..+09] 00 01           Identity string subtype tag
+[+10..+11] Length          2-byte little-endian string length (including NUL)
+[+12..nn]  Identity String NUL-terminated UTF-8 payload string (e.g. "alex\0", "kate\0")
+```
+
+2. **Authoritative `IdentifyFeatureSet` Return Buffer (`0x888` bytes, or `0x1890` with `0x1008`-byte prefix):**
+```
+[+0x00..+0x4B] WINBIO_IDENTITY (Type=3 SID, Size=0x1C, 28-byte Windows SID; 32-bit RID = Linux UID at +0x20)
+[+0x4C]        SubFactor       Matched finger slot (0xF5..0xFE)
+[+0x50..+0x53] HRESULT (rc)    0x00000000 on match, 0x8009801F (1f800980) on WINBIO_E_NO_MATCH
+[+0x78..+0x7F] Payload Length  8-byte little-endian payload size (including NUL)
+[+0x80..nn]    Payload String  NUL-terminated UTF-8 identity label
 ```
 
 ### SubFactor Slot Identifiers

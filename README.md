@@ -38,7 +38,7 @@ Confirmed working on laptops equipped with the Synaptics WBDI USB ID `06cb:0081`
 +-----------------------------------------------------------------------------------+
 | Linux Userland                                                                    |
 |                                                                                   |
-|  [ sudo / KDE lock screen / Polkit ] ---> PAM (/etc/pam.d/sudo, /etc/pam.d/kde)   |
+|  [ sudo / KDE lock screen / Polkit ] ---> PAM (/etc/pam.d/sudo, kde-fingerprint, polkit-1) |
 |                                            |                                      |
 |                                      pam_exec.so                                  |
 |                                            v                                      |
@@ -200,7 +200,7 @@ User authorizations, on-chip identity mappings, and enrolled finger slots are de
         "alex"
     ],
     "alexander": [
-        "alexand"
+        "alexander"
     ],
     "_metadata": {
         "alex": { "enrolled_fingers": [1, 2] },
@@ -211,20 +211,20 @@ User authorizations, on-chip identity mappings, and enrolled finger slots are de
 
 ### Understanding Identity Mappings (`"<user>": ["<label>", ...]`)
 
-While standard configurations like `"alex": ["alex"]` may look redundant at first glance, the mapping bridges Linux PAM accounts with on-chip hardware records:
+While standard configurations like `"alex": ["alex"]` may look redundant at first glance, the mapping bridges Linux PAM accounts with on-chip hardware records and enforces **fail-closed** multi-user isolation:
 
 | Component | Description | Example |
 | :--- | :--- | :--- |
-| **JSON Key** (`"alexander"`) | The **Linux login username** requesting authentication via PAM (`sudo`, KDE lock screen, login). | `"alexander"`, `"kate"`, `"root"` |
-| **Array Value** (`["alexand"]`) | The **hardware identity label(s)** stored inside the sensor's NVRAM that are authorized to unlock this account. | `["alexand"]`, `["alex", "admin"]` |
+| **JSON Key** (`"alexander"`) | The **Linux login username** requesting authentication via PAM (`sudo`, KDE lock screen, Polkit). Users not listed here fail closed and fall back directly to password. | `"alexander"`, `"kate"`, `"root"` |
+| **Array Value** (`["alexander"]`) | The **authorized Linux user(s) or explicit legacy hardware label(s)** allowed to unlock this account. For Linux accounts, `synaptics-bio-auth` verifies **both** the 32-bit Windows SID RID (Linux UID) and the on-chip payload string. | `["alexander"]`, `["alex", "admin"]` |
 
-#### Why Hardware Labels Differ From Linux Usernames:
-1. **7-Character Hardware Truncation:**
-   The sensor's Match-on-Chip firmware and Windows Biometric Framework packet format allocate space for only a 7-character string (plus null terminator) in the on-chip identity struct. Usernames longer than 7 characters (e.g. `alexander` or `christopher`) are stored on-chip as `alexand` or `christo`. The mapping routes the truncated hardware tag back to the full Linux account.
+#### Why Both SID RID (UID) and Hardware Labels Are Checked:
+1. **7-Character Hardware Truncation & Collision Prevention:**
+   The sensor's payload struct stores only a 7-character string (plus null terminator), so usernames longer than 7 characters (e.g., `alexander` or `student1`/`student2`) share a truncated 7-byte payload (`alexand`, `student`). Because `synaptics-bio-enroll` also writes each user's unique Linux UID into the on-chip `WINBIO_IDENTITY` SID RID and `synaptics-bio-auth` enforces strict RID equality, accounts sharing a 7-character prefix cannot impersonate one another.
 2. **Shared Accounts & Administrative Roles:**
    Multiple individual users can be authorized to authenticate a single shared account or role (e.g., `"root": ["alex", "sysadmin"]`).
-3. **Multiple Profiles & Aliases:**
-   Users with fingerprints enrolled across different labels or systems can map multiple valid identifiers to their account.
+3. **Explicit Legacy Aliases:**
+   Non-Linux hardware labels from prior enrollments (e.g., `"Unicorn"`) are only accepted if explicitly added to a user's array in `identities.json`.
 4. **Slot Tracking (`_metadata`):**
    The `_metadata` dictionary tracks which numbered finger slots (1–10) are active per user so `synaptics-bio-enroll` can automatically select the next free slot and `synaptics-bio-delete` knows which slots exist to delete.
 

@@ -67,11 +67,11 @@ if command -v innoextract >/dev/null 2>&1; then
     innoextract -q -d "${EXTRACT_DIR}" "${DRIVER_PATH}"
 elif command -v podman >/dev/null 2>&1; then
     echo "Host innoextract not found. Running innoextract via Podman container..."
-    podman run --rm -v "${TMP_DIR}:/data:z" -w /data docker.io/library/debian:bullseye sh -c \
+    podman run --rm -v "${TMP_DIR}:/data:z" -w /data docker.io/library/debian:bookworm-slim sh -c \
         "apt-get update -qq && apt-get install -y -qq innoextract >/dev/null && innoextract -q -d /data/extracted /data/${DRIVER_NAME}"
 elif command -v docker >/dev/null 2>&1; then
     echo "Host innoextract not found. Running innoextract via Docker container..."
-    docker run --rm -v "${TMP_DIR}:/data" -w /data docker.io/library/debian:bullseye sh -c \
+    docker run --rm -v "${TMP_DIR}:/data" -w /data docker.io/library/debian:bookworm-slim sh -c \
         "apt-get update -qq && apt-get install -y -qq innoextract >/dev/null && innoextract -q -d /data/extracted /data/${DRIVER_NAME}"
 else
     echo "Error: 'innoextract' is required to unpack the Windows installer." >&2

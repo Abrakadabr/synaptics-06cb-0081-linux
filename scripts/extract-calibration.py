@@ -43,16 +43,30 @@ def extract_calibration(hive_path, output_path="CalibrationData.blob"):
     with open(hive_path, "rb") as f:
         data = f.read()
 
-    idx = data.find(b"CalibrationData")
-    if idx == -1:
-        print("Error: 'CalibrationData' key not found in this registry hive.", file=sys.stderr)
+    search_pos = 0
+    vk_match = None
+    while True:
+        idx = data.find(b"CalibrationData", search_pos)
+        if idx == -1:
+            break
+        search_pos = idx + 1
+        if idx < 24:
+            continue
+        vk_off = idx - 20
+        cell_size = struct.unpack("<i", data[vk_off - 4 : vk_off])[0]
+        # Allocated registry cells have negative size; positive size indicates free/deleted cells
+        if cell_size >= 0:
+            continue
+        magic, nlen, dlen, doff, dtype, flags = struct.unpack("<2sHIIIH", data[vk_off : vk_off + 18])
+        if magic == b"vk":
+            vk_match = (nlen, dlen & 0x7FFFFFFF, doff, dtype, flags)
+            break
+
+    if vk_match is None:
+        print("Error: Could not locate valid allocated 'vk' value cell for CalibrationData.", file=sys.stderr)
         return False
 
-    vk_off = idx - 20
-    magic, nlen, dlen, doff, dtype, flags = struct.unpack("<2sHIIIH", data[vk_off:vk_off+18])
-    if magic != b"vk":
-        print("Error: Could not locate valid 'vk' value cell for CalibrationData.", file=sys.stderr)
-        return False
+    nlen, dlen, doff, dtype, flags = vk_match
 
     print(f"Found CalibrationData entry: payload length {dlen} bytes, cell offset 0x{doff:x}")
     hive = RegHive(data)

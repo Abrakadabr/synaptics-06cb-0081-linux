@@ -33,7 +33,8 @@ case "$1/$2" in
         chmod 0755 /run/synaptics-bio 2>/dev/null || true
         touch /run/synaptics-bio/lock 2>/dev/null && chmod 0666 /run/synaptics-bio/lock 2>/dev/null || true
         touch /run/synaptics-bio/meta 2>/dev/null && chmod 0666 /run/synaptics-bio/meta 2>/dev/null || true
-        /usr/bin/usbreset 06cb:0081 2>/dev/null || true
+        USBRESET_BIN="$(command -v usbreset 2>/dev/null || echo /usr/bin/usbreset)"
+        [ -x "${USBRESET_BIN}" ] && "${USBRESET_BIN}" 06cb:0081 2>/dev/null || true
         rm -f /run/synaptics-bio/suspending 2>/dev/null || true
         ;;
 esac

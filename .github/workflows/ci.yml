@@ -1,0 +1,47 @@
+name: Lint and Test
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Shell syntax check (bash -n)
+        run: |
+          bash -n install.sh uninstall.sh \
+            scripts/get-driver.sh \
+            scripts/synaptics-bio-sleep.sh \
+            scripts/setup-system-image-store.sh
+
+      - name: ShellCheck
+        run: |
+          shellcheck -S warning install.sh uninstall.sh \
+            scripts/get-driver.sh \
+            scripts/synaptics-bio-sleep.sh \
+            scripts/setup-system-image-store.sh
+
+      - name: Python syntax check
+        run: |
+          python3 -m py_compile \
+            lib/synaptics_bio_common.py \
+            bin/synaptics-bio-auth \
+            bin/synaptics-bio-enroll \
+            bin/synaptics-bio-delete \
+            scripts/patch-driver.py \
+            scripts/extract-calibration.py \
+            scripts/patch-lockscreen.py
+
+      - name: Run unit tests
+        run: python3 -m unittest discover -s tests -v

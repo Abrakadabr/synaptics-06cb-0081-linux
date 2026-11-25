@@ -52,6 +52,19 @@ def apply_patch(qml_path, force=False):
     # 1. Update handleMessage to ignore empty strings, replace fingerprint messages, and refresh fadeout timer
     old_handles = [
         """    function handleMessage(msg) {
+        if (!msg) {
+            return;
+        }
+        if (!root.notification) {
+            root.notification += msg;
+        } else if (root.notification.includes(msg)) {
+            root.notificationRepeated();
+        } else {
+            root.notification += "\\n" + msg
+        }
+        lockScreenRoot.uiVisible = true
+    }""",
+        """    function handleMessage(msg) {
         if (!root.notification) {
             root.notification += msg;
         } else if (root.notification.includes(msg)) {
@@ -287,8 +300,35 @@ def apply_patch(qml_path, force=False):
             }
         }"""
 
+    old_escape_legacy = """        Keys.onEscapePressed: {
+            // If the escape key is pressed, kscreenlocker will turn off the screen.
+            // We do not want to show the password prompt in this case.
+            if (uiVisible) {
+                uiVisible = false;
+                if (inputPanel.keyboardActive) {
+                    inputPanel.active = false;
+                }
+                root.clearPassword();
+            }
+        }"""
+
+    new_escape_legacy = """        Keys.onEscapePressed: {
+            // If the escape key is pressed, kscreenlocker will turn off the screen.
+            // We do not want to show the password prompt in this case.
+            if (uiVisible) {
+                uiVisible = false;
+                if (inputPanel.keyboardActive) {
+                    inputPanel.active = false;
+                }
+                root.clearPassword();
+                root.notification = "";
+            }
+        }"""
+
     if old_escape_kwin in content:
         content = content.replace(old_escape_kwin, new_escape_kwin, 1)
+    elif old_escape_legacy in content:
+        content = content.replace(old_escape_legacy, new_escape_legacy, 1)
 
     # 9. Extend fadeoutTimer interval, clear stale notification on fadeout, and protect notificationRemoveTimer
     old_timers = """        Timer {
@@ -342,13 +382,25 @@ def apply_patch(qml_path, force=False):
     if old_completed in content:
         content = content.replace(old_completed, new_completed, 1)
 
-    if "biometricActive" not in content or "onNoninteractiveInfo" not in content:
-        print(f"Error: Failed to match expected QML blocks in '{qml_path}'.", file=sys.stderr)
+    required_markers = (
+        ("handleMessage", 'msg.startsWith("[Fingerprint")'),
+        ("noninteractive signals", "onNoninteractiveInfo"),
+        ("biometricActive", "biometricActive"),
+        ("fadeout timer", "interval: 15000"),
+    )
+    missing_markers = [name for name, marker in required_markers if marker not in content]
+    if missing_markers:
+        print(
+            f"Error: Failed to match expected QML blocks ({', '.join(missing_markers)}) in '{qml_path}'.",
+            file=sys.stderr,
+        )
         return False
 
+    orig_mode = os.stat(qml_path).st_mode
     tmp_path = qml_path + ".tmp"
     with open(tmp_path, "w", encoding="utf-8") as f:
         f.write(content)
+    os.chmod(tmp_path, orig_mode)
 
     os.replace(tmp_path, qml_path)
     print(f"Successfully applied biometric enhancements to '{qml_path}'.")

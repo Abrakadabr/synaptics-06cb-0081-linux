@@ -57,6 +57,9 @@ if [ -f "${PAM_POLKIT}" ]; then
     if [ -f "${PAM_POLKIT}.orig-bio" ]; then
         mv "${PAM_POLKIT}.orig-bio" "${PAM_POLKIT}"
         echo "Restored ${PAM_POLKIT} from original backup."
+    elif [ -f "/opt/synaptics-bio/.created-pam-polkit" ]; then
+        rm -f "${PAM_POLKIT}"
+        echo "Removed installer-created ${PAM_POLKIT}."
     else
         sed -i '/synaptics-bio-auth/d' "${PAM_POLKIT}"
         echo "Removed synaptics-bio-auth rule from ${PAM_POLKIT}."

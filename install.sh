@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # install.sh
-# System-wide installer for Synaptics 06cb:0081 Biometric Support on Linux (Fedora, Debian, Ubuntu, etc.)
+# System-wide installer for Synaptics 06cb:0081 Biometric Support on Linux (Fedora, Debian, Ubuntu, Arch)
 
 set -euo pipefail
 
@@ -12,8 +12,47 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OPT_DIR="/opt/synaptics-bio"
-IMAGE_NAME="localhost/wine:validity"
-GHCR_IMAGE="ghcr.io/abrakadabr/synaptics-06cb-0081-linux:latest"
+
+# Insert a PAM auth rule before the first matching system auth line and verify the edit succeeded.
+insert_pam_auth_rule() {
+    local pam_file="$1"
+    local rule="$2"
+
+    if [ ! -f "${pam_file}" ]; then
+        return 1
+    fi
+
+    if grep -q "synaptics-bio-auth" "${pam_file}"; then
+        return 0
+    fi
+
+    if [ ! -f "${pam_file}.orig-bio" ]; then
+        cp -p "${pam_file}" "${pam_file}.orig-bio"
+    fi
+
+    if grep -qE '^[[:space:]]*auth[[:space:]]+(include|substack)[[:space:]]+system-auth' "${pam_file}"; then
+        sed -i -E "0,/^[[:space:]]*auth[[:space:]]+(include|substack)[[:space:]]+system-auth/s||${rule}\n&|" "${pam_file}"
+    elif grep -qE '^[[:space:]]*auth[[:space:]]+(include|substack)[[:space:]]+password-auth' "${pam_file}"; then
+        sed -i -E "0,/^[[:space:]]*auth[[:space:]]+(include|substack)[[:space:]]+password-auth/s||${rule}\n&|" "${pam_file}"
+    elif grep -qE '^[[:space:]]*@?include[[:space:]]+common-auth' "${pam_file}"; then
+        sed -i -E "0,/^[[:space:]]*@?include[[:space:]]+common-auth/s||${rule}\n&|" "${pam_file}"
+    elif grep -qE '^[[:space:]]*auth[[:space:]]+(include|substack)[[:space:]]+system-login' "${pam_file}"; then
+        sed -i -E "0,/^[[:space:]]*auth[[:space:]]+(include|substack)[[:space:]]+system-login/s||${rule}\n&|" "${pam_file}"
+    elif grep -qE '^[[:space:]]*auth[[:space:]]+' "${pam_file}"; then
+        sed -i -E "0,/^[[:space:]]*auth[[:space:]]+/s||${rule}\n&|" "${pam_file}"
+    else
+        echo "Warning: Could not find an auth rule anchor in ${pam_file}; restoring backup." >&2
+        mv "${pam_file}.orig-bio" "${pam_file}"
+        return 1
+    fi
+
+    if ! grep -q "synaptics-bio-auth" "${pam_file}"; then
+        echo "Warning: Failed to inject biometric rule into ${pam_file}; restoring backup." >&2
+        mv "${pam_file}.orig-bio" "${pam_file}"
+        return 1
+    fi
+    return 0
+}
 
 echo "=========================================================="
 echo "   Synaptics 06cb:0081 Linux Biometric Driver Setup"
@@ -31,23 +70,26 @@ fi
 # 2. Prerequisites Check
 echo "[2/7] Checking system dependencies..."
 MISSING_PKGS=()
-for cmd in podman python3 lsusb fuse-overlayfs; do
+for cmd in podman python3 lsusb zstd fuse-overlayfs; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
         MISSING_PKGS+=("$cmd")
     fi
 done
+if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
+    MISSING_PKGS+=("curl")
+fi
 
 if [ ${#MISSING_PKGS[@]} -gt 0 ]; then
     echo "Missing required utilities: ${MISSING_PKGS[*]}"
     if command -v dnf >/dev/null 2>&1; then
         echo "Installing missing packages with DNF..."
-        dnf install -y podman python3 usbutils zstd fuse-overlayfs
+        dnf install -y podman python3 usbutils zstd fuse-overlayfs curl
     elif command -v apt-get >/dev/null 2>&1; then
         echo "Installing missing packages with APT..."
-        apt-get update && apt-get install -y podman python3 usbutils zstd fuse-overlayfs
+        apt-get update && apt-get install -y podman python3 usbutils zstd fuse-overlayfs curl
     elif command -v pacman >/dev/null 2>&1; then
         echo "Installing missing packages with Pacman..."
-        pacman -Sy --noconfirm podman python usbutils zstd fuse-overlayfs
+        pacman -S --needed --noconfirm podman python usbutils zstd fuse-overlayfs curl
     else
         echo "Please install ${MISSING_PKGS[*]} using your distribution package manager." >&2
         exit 1
@@ -58,13 +100,13 @@ fi
 echo "[3/7] Setting up ${OPT_DIR}..."
 mkdir -p "${OPT_DIR}"
 
-# Copy harness binaries
+# Copy harness binaries and shared Python helper library
 cp -p "${SCRIPT_DIR}/src/identify.exe" "${OPT_DIR}/identify.exe"
 cp -p "${SCRIPT_DIR}/src/enroll.exe" "${OPT_DIR}/enroll.exe"
+cp -p "${SCRIPT_DIR}/lib/synaptics_bio_common.py" "${OPT_DIR}/synaptics_bio_common.py"
 
 # Copy configurations
 cp -p "${SCRIPT_DIR}/config/usb.txt" "${OPT_DIR}/usb.txt"
-cp -p "${SCRIPT_DIR}/config/.env" "${OPT_DIR}/.env"
 
 if [ ! -f "${OPT_DIR}/identities.json" ]; then
     if [ -f "${SCRIPT_DIR}/config/identities.json.dist" ]; then
@@ -93,48 +135,14 @@ fi
 # Secure administrative ownership and permissions
 chown -R root:root "${OPT_DIR}"
 chmod 755 "${OPT_DIR}"
-chmod 644 "${OPT_DIR}/usb.txt" "${OPT_DIR}/.env" 2>/dev/null || true
+chmod 644 "${OPT_DIR}/usb.txt" "${OPT_DIR}/synaptics_bio_common.py" 2>/dev/null || true
 [ -f "${OPT_DIR}/identities.json" ] && chmod 644 "${OPT_DIR}/identities.json"
 [ -f "${OPT_DIR}/CalibrationData.blob" ] && chmod 644 "${OPT_DIR}/CalibrationData.blob"
 chmod 755 "${OPT_DIR}"/*.dll "${OPT_DIR}"/*.exe 2>/dev/null || true
 
 # 5. Multi-User Static Image Store Setup (/usr/share/containers/storage)
 echo "[5/7] Setting up shared static container storage in /usr/share/containers/storage..."
-STATIC_STORE="/usr/share/containers/storage"
-CONF_DROPIN="/etc/containers/storage.conf.d/99-synaptics-bio.conf"
-
-mkdir -p "${STATIC_STORE}"
-if ! podman --root "${STATIC_STORE}" --runroot /run/containers/storage image exists "${IMAGE_NAME}" 2>/dev/null; then
-    if [ -f "${SCRIPT_DIR}/wine-validity.tar.zst" ]; then
-        echo "Loading ${SCRIPT_DIR}/wine-validity.tar.zst into ${STATIC_STORE}..."
-        zstdcat "${SCRIPT_DIR}/wine-validity.tar.zst" | podman --root "${STATIC_STORE}" --runroot /run/containers/storage load
-    elif [ -f "${OPT_DIR}/wine-validity.tar.zst" ]; then
-        echo "Loading ${OPT_DIR}/wine-validity.tar.zst into ${STATIC_STORE}..."
-        zstdcat "${OPT_DIR}/wine-validity.tar.zst" | podman --root "${STATIC_STORE}" --runroot /run/containers/storage load
-    else
-        echo "Attempting to pull pre-built container from GitHub Container Registry (${GHCR_IMAGE})..."
-        podman --root "${STATIC_STORE}" --runroot /run/containers/storage pull "${GHCR_IMAGE}"
-        podman --root "${STATIC_STORE}" --runroot /run/containers/storage tag "${GHCR_IMAGE}" "${IMAGE_NAME}" 2>/dev/null || true
-    fi
-    podman --root "${STATIC_STORE}" --runroot /run/containers/storage tag "${IMAGE_NAME}" wine:validity 2>/dev/null || true
-fi
-
-# Ensure all users have static read/execute traversal permissions
-chmod -R a+rX "${STATIC_STORE}"
-
-# Configure additional image store drop-in for all container engines
-mkdir -p /etc/containers/storage.conf.d
-cat << 'EOF' > "${CONF_DROPIN}"
-[storage.options]
-additionalimagestores = [
-    "/usr/share/containers/storage"
-]
-
-[storage.options.overlay]
-mount_program = "/usr/bin/fuse-overlayfs"
-EOF
-chmod 644 "${CONF_DROPIN}"
-rm -f /etc/containers/storage.rootless.conf.d/99-synaptics-bio.conf
+bash "${SCRIPT_DIR}/scripts/setup-system-image-store.sh"
 
 # 6. Install Udev Rule, Lock Directory, and CLI Tools
 echo "[6/7] Installing Udev rules, sleep hooks, and CLI tools..."
@@ -189,25 +197,26 @@ if [ -d /etc/systemd/system ] && [ -d "${SCRIPT_DIR}/systemd" ]; then
     systemctl enable synaptics-bio-lockscreen.service 2>/dev/null || true
 fi
 
-# 7. Configure PAM (sudo & KDE lock screen)
+# 7. Configure PAM (sudo, KDE lock screen, Polkit)
 echo "[7/7] Configuring PAM authentication stack..."
 PAM_SUDO="/etc/pam.d/sudo"
+if [ ! -f "${PAM_SUDO}" ] && [ -f "/usr/lib/pam.d/sudo" ]; then
+    cp -p "/usr/lib/pam.d/sudo" "${PAM_SUDO}"
+fi
 if [ -f "${PAM_SUDO}" ]; then
-    if ! grep -q "synaptics-bio-auth" "${PAM_SUDO}"; then
-        cp "${PAM_SUDO}" "${PAM_SUDO}.orig-bio"
-        if grep -q "include[[:space:]]\+system-auth" "${PAM_SUDO}"; then
-            sed -i '/auth[[:space:]]\+include[[:space:]]\+system-auth/i auth       sufficient   pam_exec.so quiet stdout /usr/local/bin/synaptics-bio-auth' "${PAM_SUDO}"
-        elif grep -q "common-auth" "${PAM_SUDO}"; then
-            sed -i '/common-auth/i auth       sufficient   pam_exec.so quiet stdout /usr/local/bin/synaptics-bio-auth' "${PAM_SUDO}"
-        fi
-        echo "Configured ${PAM_SUDO} (backup: ${PAM_SUDO}.orig-bio)."
-    else
+    if grep -q "synaptics-bio-auth" "${PAM_SUDO}"; then
         echo "${PAM_SUDO} is already configured."
+    elif insert_pam_auth_rule "${PAM_SUDO}" "auth       sufficient   pam_exec.so quiet stdout /usr/local/bin/synaptics-bio-auth"; then
+        echo "Configured ${PAM_SUDO} (backup: ${PAM_SUDO}.orig-bio)."
     fi
 fi
 
 PAM_KDE="/etc/pam.d/kde"
 PAM_KDE_FP="/etc/pam.d/kde-fingerprint"
+if [ ! -f "${PAM_KDE_FP}" ] && [ -f "/usr/lib/pam.d/kde-fingerprint" ]; then
+    cp -p "/usr/lib/pam.d/kde-fingerprint" "${PAM_KDE_FP}"
+fi
+
 if [ -f "${PAM_KDE_FP}" ]; then
     # On KDE Plasma 6 with split kde-fingerprint PAM service, keep /etc/pam.d/kde strictly for
     # interactive password-auth so password entry always works immediately in parallel with fingerprint.
@@ -220,59 +229,71 @@ if [ -f "${PAM_KDE_FP}" ]; then
         echo "Restored ${PAM_KDE} to pure password-auth (migrated lockscreen biometric auth to ${PAM_KDE_FP})."
     fi
     if [ ! -f "${PAM_KDE_FP}.orig-bio" ] && ! grep -q "synaptics-bio-auth" "${PAM_KDE_FP}"; then
-        cp "${PAM_KDE_FP}" "${PAM_KDE_FP}.orig-bio"
+        cp -p "${PAM_KDE_FP}" "${PAM_KDE_FP}.orig-bio"
     fi
-    cat << 'EOF' > "${PAM_KDE_FP}"
-auth        required      pam_env.so
-auth        sufficient    pam_exec.so quiet stdout /usr/local/bin/synaptics-bio-auth --lockscreen
-auth        required      pam_deny.so
-auth        include       postlogin
 
-account     required      pam_nologin.so
-account     include       fingerprint-auth
-
-password    include       fingerprint-auth
-
-session     required      pam_selinux.so close
-session     required      pam_loginuid.so
-session     required      pam_selinux.so open
-session     optional      pam_keyinit.so force revoke
-session     required      pam_namespace.so
-session     include       fingerprint-auth
-session     include       postlogin
-EOF
+    # Preserve the distribution's existing account/password/session lines in kde-fingerprint
+    # while replacing only the auth stack with non-interactive synaptics-bio-auth --lockscreen.
+    SRC_KDE_FP="${PAM_KDE_FP}.orig-bio"
+    [ ! -f "${SRC_KDE_FP}" ] && SRC_KDE_FP="${PAM_KDE_FP}"
+    {
+        echo "#%PAM-1.0"
+        echo "auth        required      pam_env.so"
+        echo "auth        sufficient    pam_exec.so quiet stdout /usr/local/bin/synaptics-bio-auth --lockscreen"
+        echo "auth        required      pam_deny.so"
+        if grep -qE '^[[:space:]]*auth[[:space:]]+include[[:space:]]+postlogin' "${SRC_KDE_FP}"; then
+            echo "auth        include       postlogin"
+        fi
+        grep -vE '^[[:space:]]*(#%PAM|auth[[:space:]]+)' "${SRC_KDE_FP}" || true
+    } > "${PAM_KDE_FP}.tmp"
+    mv "${PAM_KDE_FP}.tmp" "${PAM_KDE_FP}"
     chmod 644 "${PAM_KDE_FP}"
     echo "Configured ${PAM_KDE_FP} (backup: ${PAM_KDE_FP}.orig-bio)."
-elif [ -f "${PAM_KDE}" ]; then
-    if ! grep -q "synaptics-bio-auth" "${PAM_KDE}"; then
-        cp "${PAM_KDE}" "${PAM_KDE}.orig-bio"
-        if grep -q "password-auth" "${PAM_KDE}"; then
-            sed -i '/auth[[:space:]]\+substack[[:space:]]\+password-auth/i auth       sufficient   pam_exec.so quiet stdout /usr/local/bin/synaptics-bio-auth --lockscreen' "${PAM_KDE}"
-        elif grep -q "common-auth" "${PAM_KDE}"; then
-            sed -i '/common-auth/i auth       sufficient   pam_exec.so quiet stdout /usr/local/bin/synaptics-bio-auth --lockscreen' "${PAM_KDE}"
-        elif grep -q "system-login" "${PAM_KDE}"; then
-            sed -i '/system-login/i auth       sufficient   pam_exec.so quiet stdout /usr/local/bin/synaptics-bio-auth --lockscreen' "${PAM_KDE}"
-        fi
-        echo "Configured ${PAM_KDE} (backup: ${PAM_KDE}.orig-bio)."
-    else
+elif [ -f "${PAM_KDE}" ] || [ -f "/usr/lib/pam.d/kde" ]; then
+    if [ ! -f "${PAM_KDE}" ] && [ -f "/usr/lib/pam.d/kde" ]; then
+        cp -p "/usr/lib/pam.d/kde" "${PAM_KDE}"
+    fi
+    if grep -q "synaptics-bio-auth" "${PAM_KDE}"; then
         sed -i 's|/usr/local/bin/synaptics-bio-auth.*|/usr/local/bin/synaptics-bio-auth --lockscreen|' "${PAM_KDE}"
         echo "${PAM_KDE} is already configured."
+    elif insert_pam_auth_rule "${PAM_KDE}" "auth       sufficient   pam_exec.so quiet stdout /usr/local/bin/synaptics-bio-auth --lockscreen"; then
+        echo "Configured ${PAM_KDE} (backup: ${PAM_KDE}.orig-bio)."
     fi
 fi
 
 PAM_POLKIT="/etc/pam.d/polkit-1"
 if [ ! -f "${PAM_POLKIT}" ]; then
-    cp "${SCRIPT_DIR}/pam/polkit-1.snippet" "${PAM_POLKIT}"
-    chmod 644 "${PAM_POLKIT}"
-    echo "Configured ${PAM_POLKIT} (KDE GUI authentication popups)."
-elif ! grep -q "synaptics-bio-auth" "${PAM_POLKIT}"; then
-    cp "${PAM_POLKIT}" "${PAM_POLKIT}.orig-bio"
-    if grep -q "include[[:space:]]\+system-auth" "${PAM_POLKIT}"; then
-        sed -i '/auth[[:space:]]\+include[[:space:]]\+system-auth/i auth       sufficient   pam_exec.so quiet stdout /usr/local/bin/synaptics-bio-auth' "${PAM_POLKIT}"
-    elif grep -q "common-auth" "${PAM_POLKIT}"; then
-        sed -i '/common-auth/i auth       sufficient   pam_exec.so quiet stdout /usr/local/bin/synaptics-bio-auth' "${PAM_POLKIT}"
+    if [ -f "/usr/lib/pam.d/polkit-1" ]; then
+        cp -p "/usr/lib/pam.d/polkit-1" "${PAM_POLKIT}"
+        touch "${OPT_DIR}/.created-pam-polkit"
+        if insert_pam_auth_rule "${PAM_POLKIT}" "auth       sufficient   pam_exec.so quiet stdout /usr/local/bin/synaptics-bio-auth --compact"; then
+            rm -f "${PAM_POLKIT}.orig-bio"
+            echo "Configured ${PAM_POLKIT} from /usr/lib/pam.d/polkit-1 (KDE GUI authentication popups)."
+        fi
+    elif [ -f "/etc/pam.d/common-auth" ]; then
+        cat << 'EOF' > "${PAM_POLKIT}"
+#%PAM-1.0
+auth       sufficient   pam_exec.so quiet stdout /usr/local/bin/synaptics-bio-auth --compact
+@include common-auth
+@include common-account
+@include common-password
+@include common-session-noninteractive
+EOF
+        chmod 644 "${PAM_POLKIT}"
+        touch "${OPT_DIR}/.created-pam-polkit"
+        echo "Configured ${PAM_POLKIT} (Debian/Ubuntu stack)."
+    elif [ -f "/etc/pam.d/system-auth" ]; then
+        cp "${SCRIPT_DIR}/pam/polkit-1.snippet" "${PAM_POLKIT}"
+        chmod 644 "${PAM_POLKIT}"
+        touch "${OPT_DIR}/.created-pam-polkit"
+        echo "Configured ${PAM_POLKIT} (system-auth stack)."
+    else
+        echo "Warning: No existing ${PAM_POLKIT} or base PAM stack found; skipping Polkit PAM setup." >&2
     fi
-    echo "Configured ${PAM_POLKIT} (backup: ${PAM_POLKIT}.orig-bio)."
+elif ! grep -q "synaptics-bio-auth" "${PAM_POLKIT}"; then
+    if insert_pam_auth_rule "${PAM_POLKIT}" "auth       sufficient   pam_exec.so quiet stdout /usr/local/bin/synaptics-bio-auth --compact"; then
+        echo "Configured ${PAM_POLKIT} (backup: ${PAM_POLKIT}.orig-bio)."
+    fi
 else
     echo "${PAM_POLKIT} is already configured."
 fi
