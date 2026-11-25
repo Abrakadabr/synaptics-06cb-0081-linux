@@ -147,15 +147,13 @@ bash "${SCRIPT_DIR}/scripts/setup-system-image-store.sh"
 # 6. Install Udev Rule, Lock Directory, and CLI Tools
 echo "[6/7] Installing Udev rules, sleep hooks, and CLI tools..."
 rm -f /etc/udev/rules.d/99-synaptics-fingerprint.rules
-cp "${SCRIPT_DIR}/udev/70-synaptics-bio.rules" /etc/udev/rules.d/70-synaptics-bio.rules
+install -o root -g root -m 644 "${SCRIPT_DIR}/udev/70-synaptics-bio.rules" /etc/udev/rules.d/70-synaptics-bio.rules
 udevadm control --reload-rules 2>/dev/null || true
 udevadm trigger 2>/dev/null || true
 
-cp "${SCRIPT_DIR}/bin/synaptics-bio-auth" /usr/local/bin/synaptics-bio-auth
-cp "${SCRIPT_DIR}/bin/synaptics-bio-enroll" /usr/local/bin/synaptics-bio-enroll
-cp "${SCRIPT_DIR}/bin/synaptics-bio-delete" /usr/local/bin/synaptics-bio-delete
-chown root:root /usr/local/bin/synaptics-bio-auth /usr/local/bin/synaptics-bio-enroll /usr/local/bin/synaptics-bio-delete
-chmod 755 /usr/local/bin/synaptics-bio-auth /usr/local/bin/synaptics-bio-enroll /usr/local/bin/synaptics-bio-delete
+install -o root -g root -m 755 "${SCRIPT_DIR}/bin/synaptics-bio-auth" /usr/local/bin/synaptics-bio-auth
+install -o root -g root -m 755 "${SCRIPT_DIR}/bin/synaptics-bio-enroll" /usr/local/bin/synaptics-bio-enroll
+install -o root -g root -m 755 "${SCRIPT_DIR}/bin/synaptics-bio-delete" /usr/local/bin/synaptics-bio-delete
 
 # Install systemd tmpfiles configuration to ensure /run lock and runtime paths exist after reboot
 mkdir -p /etc/tmpfiles.d
@@ -164,6 +162,7 @@ d /run/synaptics-bio 0755 root root -
 f /run/synaptics-bio/lock 0666 root root -
 f /run/synaptics-bio/meta 0666 root root -
 EOF
+chown root:root /etc/tmpfiles.d/synaptics-bio.conf
 chmod 644 /etc/tmpfiles.d/synaptics-bio.conf
 mkdir -p /run/synaptics-bio
 chmod 0755 /run/synaptics-bio
@@ -179,19 +178,18 @@ rm -f /run/lock/synaptics-bio.lock /run/lock/synaptics-bio.meta
 SLEEP_HOOK_DIR="/etc/systemd/system-sleep"
 [ ! -d "${SLEEP_HOOK_DIR}" ] && SLEEP_HOOK_DIR="/usr/lib/systemd/system-sleep"
 if [ -d "${SLEEP_HOOK_DIR}" ]; then
-    cp "${SCRIPT_DIR}/scripts/synaptics-bio-sleep.sh" "${SLEEP_HOOK_DIR}/synaptics-bio-sleep"
-    chmod 755 "${SLEEP_HOOK_DIR}/synaptics-bio-sleep"
+    install -o root -g root -m 755 "${SCRIPT_DIR}/scripts/synaptics-bio-sleep.sh" "${SLEEP_HOOK_DIR}/synaptics-bio-sleep"
 fi
 
 # Configure KDE Plasma lockscreen UI message replacement and keepalive if present
-install -m 755 "${SCRIPT_DIR}/scripts/patch-lockscreen.py" /usr/local/bin/synaptics-bio-patch-lockscreen
+install -o root -g root -m 755 "${SCRIPT_DIR}/scripts/patch-lockscreen.py" /usr/local/bin/synaptics-bio-patch-lockscreen
 LOCKSCREEN_QML="/usr/share/plasma/shells/org.kde.plasma.desktop/contents/lockscreen/LockScreenUi.qml"
 if [ -f "${LOCKSCREEN_QML}" ]; then
     /usr/local/bin/synaptics-bio-patch-lockscreen --apply --force "${LOCKSCREEN_QML}" || true
 fi
 if [ -d /etc/systemd/system ] && [ -d "${SCRIPT_DIR}/systemd" ]; then
-    install -m 644 "${SCRIPT_DIR}/systemd/synaptics-bio-lockscreen.service" /etc/systemd/system/synaptics-bio-lockscreen.service
-    install -m 644 "${SCRIPT_DIR}/systemd/synaptics-bio-lockscreen.path" /etc/systemd/system/synaptics-bio-lockscreen.path
+    install -o root -g root -m 644 "${SCRIPT_DIR}/systemd/synaptics-bio-lockscreen.service" /etc/systemd/system/synaptics-bio-lockscreen.service
+    install -o root -g root -m 644 "${SCRIPT_DIR}/systemd/synaptics-bio-lockscreen.path" /etc/systemd/system/synaptics-bio-lockscreen.path
     systemctl daemon-reload 2>/dev/null || true
     systemctl enable --now synaptics-bio-lockscreen.path 2>/dev/null || true
     systemctl enable synaptics-bio-lockscreen.service 2>/dev/null || true
