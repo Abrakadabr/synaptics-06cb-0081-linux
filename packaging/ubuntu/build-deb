@@ -42,6 +42,7 @@ cd "$work"
 mkdir src root
 "${git_src[@]}" archive --format=tar "$revision" | tar -xf - -C src
 patch --batch --forward --fuzz=0 -d src -p1 < "$recipe/ubuntu-setup.patch"
+patch --batch --forward --fuzz=0 -d src -p1 < "$recipe/packaging/resume.patch"
 
 SOURCE_DATE_EPOCH=$("${git_src[@]}" show -s --format=%ct "$revision")
 export SOURCE_DATE_EPOCH SYNA_TUDOR_INSTALLER="$installer"

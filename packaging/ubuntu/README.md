@@ -29,3 +29,9 @@ synatudor-setup
 Run setup as the desktop user. First initialization can replace Windows Hello pairing; keep password access available. Keep the reader uncovered until prompted. If setup reports no device during USB re-enumeration, let it settle and run `fprintd-list "$USER"`. If Synaptics Tudor appears but has no enrolled finger, use `fprintd-enroll -f right-index-finger`, then `fprintd-verify -f right-index-finger`. If it does not appear, inspect `journalctl -b -u fprintd -u tudor-host-launcher` locally rather than resetting ownership. Do not post unredacted logs or sensor state.
 
 For optional GNOME screen unlock after verifying your print, install `libpam-fprintd` and run `sudo gdm-config fingerprint --enable`. Global PAM changes are unnecessary. GNOME Keyring still needs the password at initial login. `sudo apt remove synatudor-0081` removes the package, not the reader’s pairing or enrolled data.
+
+### Suspend/resume limitation
+
+On a Yoga 920, the original sandbox killed `tudor_host` on x86-64 syscall 219 (`restart_syscall`) on two wakes. Package revision `26.04.2` allows that syscall so the kernel can resume an interrupted wait. A sandboxed `poll` survived `SIGSTOP`/`SIGCONT` in testing. Neither of two subsequent hardware wakes logged the same seccomp kill, but **fingerprint unlock after resume is still unreliable**: one capture failed with `0x80098036` and host exit 134; on the other wake `fprintd` rejected GDM's claim because the device was already claimed.
+
+Use password fallback if this happens. Do not run `synatudor-reset` in a suspend service's `ExecStartPost`: its service-management step timed out there and left `fprintd` runtime-masked. If recovery is needed, run `sudo synatudor-reset` from the unlocked session, then `fprintd-verify`. Do not reset ownership or re-enroll for this failure.
