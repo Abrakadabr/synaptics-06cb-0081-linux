@@ -237,11 +237,9 @@ if [ -f "${PAM_KDE_FP}" ]; then
     {
         echo "#%PAM-1.0"
         echo "auth        required      pam_env.so"
-        echo "auth        [success=1 default=ignore] pam_exec.so quiet stdout /usr/local/bin/synaptics-bio-auth --lockscreen"
-        echo "auth        requisite     pam_deny.so"
-        if grep -qE '^[[:space:]]*auth[[:space:]]+include[[:space:]]+postlogin' "${SRC_KDE_FP}"; then
-            echo "auth        include       postlogin"
-        fi
+        echo "auth        optional      pam_permit.so"
+        echo "auth        sufficient    pam_exec.so quiet stdout /usr/local/bin/synaptics-bio-auth --lockscreen"
+        echo "auth        required      pam_deny.so"
         grep -vE '^[[:space:]]*(#%PAM|auth[[:space:]]+)' "${SRC_KDE_FP}" || true
     } > "${PAM_KDE_FP}.tmp"
     mv "${PAM_KDE_FP}.tmp" "${PAM_KDE_FP}"

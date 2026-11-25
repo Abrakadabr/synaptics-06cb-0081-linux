@@ -262,6 +262,7 @@ def main():
     start_time = time.monotonic()
     total_timeout = 30.0
 
+    parent_exited = False
     while attempt < max_attempts:
         attempt += 1
         elapsed = time.monotonic() - start_time
@@ -369,6 +370,7 @@ def main():
                 if lockscreen_mode:
                     if os.getppid() == 1 or os.getppid() != initial_ppid:
                         write_log("Parent process exited, terminating lockscreen auth session\n")
+                        parent_exited = True
                         break
 
                 if not rlist:
@@ -497,7 +499,7 @@ def main():
             if uid == 0:
                 bio.ensure_calibration_permissions(opt_dir)
 
-        if success or wrong_user_desc or container_failed_early:
+        if success or wrong_user_desc or container_failed_early or parent_exited:
             break
 
         if no_match_detected and ((attempt >= max_attempts) or ((total_timeout - (time.monotonic() - start_time)) <= 4)):
