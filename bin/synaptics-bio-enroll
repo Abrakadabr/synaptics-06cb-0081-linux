@@ -222,7 +222,10 @@ def main():
         "--net=none",
         "--cap-drop=ALL",
         "--security-opt", "label=disable",
+        "--tmpfs", "/tmp:rw,nosuid,nodev,mode=1777",
         "--device", dev_path,
+        "-e", "HOME=/tmp",
+        "-e", "WINEPREFIX=/tmp/.wine",
         "-e", "WINEPATH=/usr/lib/gcc/x86_64-w64-mingw32/10-win32;/usr/x86_64-w64-mingw32/lib",
         "-e", "WINEDEBUG=fixme-all,err-all,trace+winusb",
         "-w", opt_dir,
@@ -230,7 +233,7 @@ def main():
         "-v", f"{opt_dir}:{opt_dir}",
         image,
         "sh", "-c",
-        'mkdir -p /root/.wine/drive_c && cp "$1/usb.txt" /root/.wine/drive_c/usb.txt && exec wine64 "./$2" enroll',
+        'mkdir -p /tmp/.wine/drive_c && cp "$1/usb.txt" /tmp/.wine/drive_c/usb.txt && exec wine64 "./$2" enroll',
         "_", opt_dir, patched_exe_name,
     ]
 
