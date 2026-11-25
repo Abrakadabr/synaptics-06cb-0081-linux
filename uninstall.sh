@@ -31,18 +31,7 @@ if [ -f "${PAM_SUDO}" ]; then
     fi
 fi
 
-# 2. Restore PAM KDE & KDE Fingerprint
-PAM_KDE="/etc/pam.d/kde"
-if [ -f "${PAM_KDE}" ]; then
-    if [ -f "${PAM_KDE}.orig-bio" ]; then
-        mv "${PAM_KDE}.orig-bio" "${PAM_KDE}"
-        echo "Restored ${PAM_KDE} from original backup."
-    else
-        sed -i '/synaptics-bio-auth/d' "${PAM_KDE}"
-        echo "Removed synaptics-bio-auth rule from ${PAM_KDE}."
-    fi
-fi
-
+# 2. Restore PAM KDE Fingerprint
 PAM_KDE_FP="/etc/pam.d/kde-fingerprint"
 if [ -f "${PAM_KDE_FP}" ]; then
     if [ -f "${PAM_KDE_FP}.orig-bio" ]; then
@@ -80,9 +69,7 @@ if [ -f "/etc/udev/rules.d/70-synaptics-bio.rules" ]; then
     echo "Removed /etc/udev/rules.d/70-synaptics-bio.rules."
 fi
 
-# 5. Remove Dedicated Synaptics Static Image Store and Legacy Drop-ins
-rm -f "/etc/containers/storage.conf.d/99-synaptics-bio.conf"
-rm -f "/etc/containers/storage.rootless.conf.d/99-synaptics-bio.conf"
+# 5. Remove Dedicated Synaptics Static Image Store
 if [ -d "/usr/share/synaptics-bio" ]; then
     rm -rf "/usr/share/synaptics-bio"
     echo "Removed /usr/share/synaptics-bio."
@@ -91,12 +78,6 @@ if [ -d "/var/lib/synaptics-bio" ]; then
     rm -rf "/var/lib/synaptics-bio"
     echo "Removed /var/lib/synaptics-bio."
 fi
-# Safely untag our images from legacy /usr/share/containers/storage without deleting unrelated images
-if [ -d "/usr/share/containers/storage/overlay-images" ] && command -v podman >/dev/null 2>&1; then
-    podman --root /usr/share/containers/storage --runroot /run/containers/storage \
-        rmi localhost/wine:validity wine:validity ghcr.io/abrakadabr/synaptics-06cb-0081-linux:latest 2>/dev/null || true
-fi
-echo "Cleaned up container storage state."
 
 # 6. Remove CLI wrappers, sleep hook, systemd watcher, tmpfiles config, and locks
 systemctl disable --now synaptics-bio-lockscreen.path synaptics-bio-lockscreen.service 2>/dev/null || true
@@ -110,7 +91,6 @@ rm -f /usr/local/bin/synaptics-bio-patch-lockscreen
 rm -f /etc/systemd/system-sleep/synaptics-bio-sleep
 rm -f /usr/lib/systemd/system-sleep/synaptics-bio-sleep
 rm -f /etc/tmpfiles.d/synaptics-bio.conf
-rm -f /run/lock/synaptics-bio.lock /run/lock/synaptics-bio.meta
 rm -rf /run/synaptics-bio
 echo "Removed CLI tools, sleep hooks, systemd units, and tmpfiles configuration."
 

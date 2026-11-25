@@ -144,13 +144,14 @@ class TestAuthorizationIsolation(unittest.TestCase):
         self.assertFalse(bio.evaluate_match(rules, 1261, "Unicorn"))
         self.assertTrue(bio.evaluate_match(rules, 1000, "alex"))
 
-    def test_explicit_legacy_alias_and_shared_account(self):
+    def test_non_linux_alias_rejected_and_shared_account(self):
         ident_map = {
             "alex": ["alex", "Unicorn"],
             "root": ["alex", "kate"],
         }
         rules_alex, _, _ = bio.build_auth_policy(ident_map, "alex", self.uid_lookup)
-        self.assertTrue(bio.evaluate_match(rules_alex, 1261, "Unicorn"))
+        self.assertFalse(bio.evaluate_match(rules_alex, 1261, "Unicorn"))
+        self.assertTrue(bio.evaluate_match(rules_alex, 1000, "alex"))
         self.assertFalse(bio.evaluate_match(rules_alex, 1001, "kate"))
 
         rules_root, _, _ = bio.build_auth_policy(ident_map, "root", self.uid_lookup)
@@ -351,15 +352,6 @@ class TestHelperScripts(unittest.TestCase):
                 self.assertIn('msg.includes("not \'")', patched_qml)
                 # Idempotent second run
                 self.assertTrue(mod.apply_patch(qml))
-                # Legacy-patched file (having biometricActive without biometricPaused) upgrades cleanly from backup
-                legacy_qml = patched_qml.replace("property bool biometricPaused: false\n", "").replace(
-                    "!parent.biometricPaused", '!root.notification.includes("Falling back")'
-                )
-                with open(qml, "w", encoding="utf-8") as f:
-                    f.write(legacy_qml)
-                self.assertTrue(mod.apply_patch(qml))
-                with open(qml, "r", encoding="utf-8") as f:
-                    self.assertIn("!parent.biometricPaused", f.read())
                 # Revert restores exact original
                 self.assertTrue(mod.revert_patch(qml))
             finally:
@@ -374,11 +366,11 @@ class TestHelperScripts(unittest.TestCase):
             runtime_dir = os.path.join(tmp, "runtime")
             # Uninitialized store returns None
             self.assertIsNone(
-                bio.ensure_isolated_storage_conf(1000, tmp, store_candidates=(fake_store,), runtime_base=runtime_dir)
+                bio.ensure_isolated_storage_conf(1000, tmp, static_store=fake_store, runtime_base=runtime_dir)
             )
             os.makedirs(os.path.join(fake_store, "overlay-images"))
             conf_path = bio.ensure_isolated_storage_conf(
-                1000, tmp, store_candidates=(fake_store,), runtime_base=runtime_dir
+                1000, tmp, static_store=fake_store, runtime_base=runtime_dir
             )
             self.assertIsNotNone(conf_path)
             self.assertEqual(stat.S_IMODE(os.stat(conf_path).st_mode), 0o600)

@@ -140,13 +140,12 @@ chmod 644 "${OPT_DIR}/usb.txt" "${OPT_DIR}/synaptics_bio_common.py" 2>/dev/null 
 [ -f "${OPT_DIR}/CalibrationData.blob" ] && chmod 644 "${OPT_DIR}/CalibrationData.blob"
 chmod 755 "${OPT_DIR}"/*.dll "${OPT_DIR}"/*.exe 2>/dev/null || true
 
-# 5. Multi-User Static Image Store Setup (/usr/share/containers/storage)
-echo "[5/7] Setting up shared static container storage in /usr/share/containers/storage..."
+# 5. Multi-User Static Image Store Setup (/usr/share/synaptics-bio/containers-storage)
+echo "[5/7] Setting up shared static container storage in /usr/share/synaptics-bio/containers-storage..."
 bash "${SCRIPT_DIR}/scripts/setup-system-image-store.sh"
 
 # 6. Install Udev Rule, Lock Directory, and CLI Tools
 echo "[6/7] Installing Udev rules, sleep hooks, and CLI tools..."
-rm -f /etc/udev/rules.d/99-synaptics-fingerprint.rules
 install -o root -g root -m 644 "${SCRIPT_DIR}/udev/70-synaptics-bio.rules" /etc/udev/rules.d/70-synaptics-bio.rules
 udevadm control --reload-rules 2>/dev/null || true
 udevadm trigger --action=change --subsystem-match=usb --attr-match=idVendor=06cb --attr-match=idProduct=0081 2>/dev/null || true
@@ -172,7 +171,6 @@ for f in /run/synaptics-bio/lock /run/synaptics-bio/meta; do
     chown root:root "$f"
     chmod 0666 "$f"
 done
-rm -f /run/lock/synaptics-bio.lock /run/lock/synaptics-bio.meta
 
 # Install systemd suspend/resume hook to keep USB sensor healthy across sleep
 SLEEP_HOOK_DIR="/etc/systemd/system-sleep"
@@ -215,7 +213,6 @@ if [ -f "${PAM_SUDO}" ]; then
     fi
 fi
 
-PAM_KDE="/etc/pam.d/kde"
 PAM_KDE_FP="/etc/pam.d/kde-fingerprint"
 if [ ! -f "${PAM_KDE_FP}" ] && [ -f "/usr/lib/pam.d/kde-fingerprint" ]; then
     cp -p "/usr/lib/pam.d/kde-fingerprint" "${PAM_KDE_FP}"
@@ -223,16 +220,6 @@ if [ ! -f "${PAM_KDE_FP}" ] && [ -f "/usr/lib/pam.d/kde-fingerprint" ]; then
 fi
 
 if [ -f "${PAM_KDE_FP}" ]; then
-    # On KDE Plasma 6 with split kde-fingerprint PAM service, keep /etc/pam.d/kde strictly for
-    # interactive password-auth so password entry always works immediately in parallel with fingerprint.
-    if [ -f "${PAM_KDE}" ] && grep -q "synaptics-bio-auth" "${PAM_KDE}"; then
-        if [ -f "${PAM_KDE}.orig-bio" ]; then
-            mv "${PAM_KDE}.orig-bio" "${PAM_KDE}"
-        else
-            sed -i '/synaptics-bio-auth/d' "${PAM_KDE}"
-        fi
-        echo "Restored ${PAM_KDE} to pure password-auth (migrated lockscreen biometric auth to ${PAM_KDE_FP})."
-    fi
     if [ ! -f "${OPT_DIR}/.created-pam-kde-fp" ] && [ ! -f "${PAM_KDE_FP}.orig-bio" ] && ! grep -q "synaptics-bio-auth" "${PAM_KDE_FP}"; then
         cp -p "${PAM_KDE_FP}" "${PAM_KDE_FP}.orig-bio"
     fi
@@ -260,16 +247,6 @@ if [ -f "${PAM_KDE_FP}" ]; then
     mv "${PAM_KDE_FP}.tmp" "${PAM_KDE_FP}"
     chmod 644 "${PAM_KDE_FP}"
     echo "Configured ${PAM_KDE_FP}."
-elif [ -f "${PAM_KDE}" ] || [ -f "/usr/lib/pam.d/kde" ]; then
-    if [ ! -f "${PAM_KDE}" ] && [ -f "/usr/lib/pam.d/kde" ]; then
-        cp -p "/usr/lib/pam.d/kde" "${PAM_KDE}"
-    fi
-    if grep -q "synaptics-bio-auth" "${PAM_KDE}"; then
-        sed -i 's|/usr/local/bin/synaptics-bio-auth.*|/usr/local/bin/synaptics-bio-auth --lockscreen|' "${PAM_KDE}"
-        echo "${PAM_KDE} is already configured."
-    elif insert_pam_auth_rule "${PAM_KDE}" "auth       sufficient   pam_exec.so quiet stdout /usr/local/bin/synaptics-bio-auth --lockscreen"; then
-        echo "Configured ${PAM_KDE} (backup: ${PAM_KDE}.orig-bio)."
-    fi
 fi
 
 PAM_POLKIT="/etc/pam.d/polkit-1"

@@ -16,7 +16,6 @@ case "$1/$2" in
         for cid in $(podman ps -q --filter "name=synaptics-bio-auth" 2>/dev/null); do
             podman rm -f "${cid}" 2>/dev/null || true
         done
-        rm -f /run/lock/synaptics-bio.lock /run/lock/synaptics-bio.meta 2>/dev/null || true
         ;;
     post/*)
         # On wake-up, ensure USB autosuspend is disabled and cryptoprocessor is reset

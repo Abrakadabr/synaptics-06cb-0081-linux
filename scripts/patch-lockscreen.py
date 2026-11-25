@@ -56,8 +56,7 @@ def apply_patch(qml_path, force=False):
 
     # 1. Update handleMessage to ignore empty strings, track terminal biometric pause state,
     #    replace fingerprint messages, and refresh fadeout timer
-    old_handles = [
-        """    function handleMessage(msg) {
+    old_handle = """    function handleMessage(msg) {
         if (!msg) {
             return;
         }
@@ -69,36 +68,7 @@ def apply_patch(qml_path, force=False):
             root.notification += "\\n" + msg
         }
         lockScreenRoot.uiVisible = true
-    }""",
-        """    function handleMessage(msg) {
-        if (!root.notification) {
-            root.notification += msg;
-        } else if (root.notification.includes(msg)) {
-            root.notificationRepeated();
-        } else {
-            root.notification += "\\n" + msg
-        }
-        lockScreenRoot.uiVisible = true
-    }""",
-        """    function handleMessage(msg) {
-        if (!root.notification) {
-            root.notification += msg;
-        } else if (root.notification.includes(msg)) {
-            root.notificationRepeated();
-        } else {
-            root.notification += "\\n" + msg
-        }
-    }""",
-        """    function handleMessage(msg) {
-        if (!root.notification || msg.startsWith("[Fingerprint") || msg.startsWith("Fingerprint")) {
-            root.notification = msg;
-        } else if (root.notification.includes(msg)) {
-            root.notificationRepeated();
-        } else {
-            root.notification += "\\n" + msg
-        }
-    }""",
-    ]
+    }"""
 
     new_handle = """    function handleMessage(msg) {
         if (!msg) {
@@ -120,10 +90,8 @@ def apply_patch(qml_path, force=False):
         fadeoutTimer.restart();
     }"""
 
-    for old_handle in old_handles:
-        if old_handle in content:
-            content = content.replace(old_handle, new_handle, 1)
-            break
+    if old_handle in content:
+        content = content.replace(old_handle, new_handle, 1)
 
     # 2. Forward non-interactive fingerprint messages (/etc/pam.d/kde-fingerprint) to handleMessage
     old_prompt_secret = """        function onPromptForSecretChanged() {
@@ -179,12 +147,12 @@ def apply_patch(qml_path, force=False):
     if old_suspend in content:
         content = content.replace(old_suspend, new_suspend, 1)
 
-    # 4. Add biometricActive and biometricPaused to lockScreenRoot (supports Plasma 6.7.5+ and older inputPanel)
-    old_block_ui_kwin = """        property bool uiVisible: false
+    # 4. Add biometricActive and biometricPaused to lockScreenRoot
+    old_block_ui = """        property bool uiVisible: false
         property bool seenPositionChange: false
         property bool blockUI: containsMouse && (mainStack.depth > 1 || mainBlock.mainPasswordBox.text.length > 0 || Keyboards.KWinVirtualKeyboard.visible)"""
 
-    new_block_ui_kwin = """        property bool uiVisible: false
+    new_block_ui = """        property bool uiVisible: false
         property bool seenPositionChange: false
         property bool biometricPaused: false
         readonly property bool biometricActive: (root.notification.startsWith("[Fingerprint") || root.notification.startsWith("Fingerprint"))
@@ -193,23 +161,8 @@ def apply_patch(qml_path, force=False):
             && !root.notification.includes("not '")
         property bool blockUI: (containsMouse && (mainStack.depth > 1 || mainBlock.mainPasswordBox.text.length > 0 || Keyboards.KWinVirtualKeyboard.visible)) || biometricActive"""
 
-    old_block_ui_legacy = """        property bool uiVisible: false
-        property bool seenPositionChange: false
-        property bool blockUI: containsMouse && (mainStack.depth > 1 || mainBlock.mainPasswordBox.text.length > 0 || inputPanel.keyboardActive)"""
-
-    new_block_ui_legacy = """        property bool uiVisible: false
-        property bool seenPositionChange: false
-        property bool biometricPaused: false
-        readonly property bool biometricActive: (root.notification.startsWith("[Fingerprint") || root.notification.startsWith("Fingerprint"))
-            && !root.notification.includes("Falling back")
-            && !root.notification.includes("Adjust finger or use password")
-            && !root.notification.includes("not '")
-        property bool blockUI: (containsMouse && (mainStack.depth > 1 || mainBlock.mainPasswordBox.text.length > 0 || inputPanel.keyboardActive)) || biometricActive"""
-
-    if old_block_ui_kwin in content:
-        content = content.replace(old_block_ui_kwin, new_block_ui_kwin, 1)
-    elif old_block_ui_legacy in content:
-        content = content.replace(old_block_ui_legacy, new_block_ui_legacy, 1)
+    if old_block_ui in content:
+        content = content.replace(old_block_ui, new_block_ui, 1)
 
     # 5. Guard authenticator.startAuthenticating() inside if (uiVisible) and reset biometricPaused across visibility transitions
     old_on_ui_visible = """        onUiVisibleChanged: {
@@ -260,7 +213,7 @@ def apply_patch(qml_path, force=False):
     if old_heartbeat in content:
         content = content.replace(old_heartbeat, new_heartbeat, 1)
 
-    # 7. Prevent ActiveScreenMonitor (Plasma 6.7.5+) or onExited (older Plasma 6) from closing UI when blockUI is active
+    # 7. Prevent ActiveScreenMonitor from closing UI when blockUI is active
     old_active_screen = """            onActiveChanged: {
                 if(!active) {
                     lockScreenRoot.uiVisible = false;
@@ -276,21 +229,8 @@ def apply_patch(qml_path, force=False):
     if old_active_screen in content:
         content = content.replace(old_active_screen, new_active_screen, 1)
 
-    old_on_exited = """        onExited: {
-            uiVisible = false;
-        }"""
-
-    new_on_exited = """        onExited: {
-            if (!blockUI) {
-                uiVisible = false;
-            }
-        }"""
-
-    if old_on_exited in content:
-        content = content.replace(old_on_exited, new_on_exited, 1)
-
     # 8. Clear notification and pause state on Escape key press so next wake-up starts fresh fingerprint auth
-    old_escape_kwin = """        Keys.onEscapePressed: {
+    old_escape = """        Keys.onEscapePressed: {
             // If the escape key is pressed, kscreenlocker will turn off the screen.
             // We do not want to show the password prompt in this case.
             if (uiVisible) {
@@ -302,7 +242,7 @@ def apply_patch(qml_path, force=False):
             }
         }"""
 
-    new_escape_kwin = """        Keys.onEscapePressed: {
+    new_escape = """        Keys.onEscapePressed: {
             // If the escape key is pressed, kscreenlocker will turn off the screen.
             // We do not want to show the password prompt in this case.
             if (uiVisible) {
@@ -316,36 +256,8 @@ def apply_patch(qml_path, force=False):
             }
         }"""
 
-    old_escape_legacy = """        Keys.onEscapePressed: {
-            // If the escape key is pressed, kscreenlocker will turn off the screen.
-            // We do not want to show the password prompt in this case.
-            if (uiVisible) {
-                uiVisible = false;
-                if (inputPanel.keyboardActive) {
-                    inputPanel.active = false;
-                }
-                root.clearPassword();
-            }
-        }"""
-
-    new_escape_legacy = """        Keys.onEscapePressed: {
-            // If the escape key is pressed, kscreenlocker will turn off the screen.
-            // We do not want to show the password prompt in this case.
-            if (uiVisible) {
-                uiVisible = false;
-                if (inputPanel.keyboardActive) {
-                    inputPanel.active = false;
-                }
-                root.clearPassword();
-                root.notification = "";
-                biometricPaused = false;
-            }
-        }"""
-
-    if old_escape_kwin in content:
-        content = content.replace(old_escape_kwin, new_escape_kwin, 1)
-    elif old_escape_legacy in content:
-        content = content.replace(old_escape_legacy, new_escape_legacy, 1)
+    if old_escape in content:
+        content = content.replace(old_escape, new_escape, 1)
 
     # 9. Extend fadeoutTimer interval, clear stale notification on fadeout, and protect notificationRemoveTimer
     old_timers = """        Timer {

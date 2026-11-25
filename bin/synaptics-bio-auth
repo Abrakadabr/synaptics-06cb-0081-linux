@@ -91,8 +91,8 @@ def main():
     if not target_user:
         sys.exit(1)
 
-    # Check for bypass flag in root-controlled /run or /etc
-    if os.path.exists("/run/synaptics-bio/disable-bio-auth") or os.path.exists("/etc/synaptics-bio/disable-bio-auth"):
+    # Check for global bypass flag in root-controlled /run
+    if os.path.exists("/run/synaptics-bio/disable-bio-auth"):
         sys.exit(1)
 
     # Check for user-specific bypass flag
@@ -110,9 +110,6 @@ def main():
         sys.exit(1)
 
     config_file = os.path.join(opt_dir, "identities.json")
-    if not os.path.exists(config_file):
-        config_file = "/etc/synaptics-bio/identities.json"
-
     ident_map = {}
     if os.path.exists(config_file):
         try:
@@ -189,20 +186,6 @@ def main():
         pass
 
     if uid == 0:
-        # Clean up legacy drop-ins if they improperly reference /var/lib/containers/storage
-        for check_f in (
-            "/etc/containers/storage.conf.d/99-synaptics-bio.conf",
-            "/etc/containers/storage.rootless.conf.d/99-synaptics-bio.conf",
-        ):
-            if os.path.exists(check_f):
-                try:
-                    with open(check_f, "r", encoding="utf-8") as f_chk:
-                        if "/var/lib/containers/storage" in f_chk.read():
-                            os.remove(check_f)
-                except Exception:
-                    pass
-
-    if uid == 0:
         log_file = "/var/log/synaptics-bio-auth.log"
         if not os.access(os.path.dirname(log_file), os.W_OK, effective_ids=True):
             log_file = os.path.join(bio.RUN_BIO_DIR, "auth.log")
@@ -229,10 +212,7 @@ def main():
         except Exception:
             pass
 
-    rule_summary = [
-        f"{r['alias']}(uid={r['uid']})" if r["uid"] is not None else f"{r['alias']}(alias)"
-        for r in auth_rules
-    ]
+    rule_summary = [f"{r['alias']}(uid={r['uid']})" for r in auth_rules]
     write_log(f"\n--- Auth attempt at {time.ctime()} (PID {pid}) ---\n")
     write_log(f"Target User: {target_user} (Authorized Rules: {rule_summary})\n")
     write_log(f"UID={os.getuid()} EUID={os.geteuid()}\n")

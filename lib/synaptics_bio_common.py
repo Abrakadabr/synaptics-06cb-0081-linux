@@ -17,10 +17,7 @@ import subprocess
 import time
 
 RUN_BIO_DIR = "/run/synaptics-bio"
-STATIC_STORE_CANDIDATES = (
-    "/usr/share/synaptics-bio/containers-storage",
-    "/usr/share/containers/storage",
-)
+STATIC_STORE_DIR = "/usr/share/synaptics-bio/containers-storage"
 IMAGE_CANDIDATES = [
     "localhost/wine:validity",
     "wine:validity",
@@ -65,18 +62,13 @@ def resolve_opt_dir(script_file):
     return None
 
 
-def ensure_isolated_storage_conf(uid, home_dir, store_candidates=STATIC_STORE_CANDIDATES, runtime_base=None):
+def ensure_isolated_storage_conf(uid, home_dir, static_store=STATIC_STORE_DIR, runtime_base=None):
     """
     Generate a private CONTAINERS_STORAGE_CONF referencing the read-only shared image store
     so synaptics-bio never mutates /etc/containers/storage.conf.d or user Podman databases.
     Returns the path to storage.conf, or None if no initialized static store is present.
     """
-    static_store = None
-    for cand in store_candidates:
-        if os.path.isdir(os.path.join(cand, "overlay-images")):
-            static_store = cand
-            break
-    if not static_store:
+    if not static_store or not os.path.isdir(os.path.join(static_store, "overlay-images")):
         return None
 
     try:
@@ -225,18 +217,6 @@ def get_lock_paths():
                 return lock_f, meta_f
         except Exception:
             pass
-
-    fallback_lock = "/run/lock/synaptics-bio.lock"
-    fallback_meta = "/run/lock/synaptics-bio.meta"
-    try:
-        if (
-            os.path.isfile(fallback_lock)
-            and not os.path.islink(fallback_lock)
-            and os.access(fallback_lock, os.W_OK)
-        ):
-            return fallback_lock, fallback_meta
-    except Exception:
-        pass
 
     user_run = f"/run/user/{uid}"
     if os.path.isdir(user_run) and os.access(user_run, os.W_OK):
@@ -560,7 +540,7 @@ def ensure_usb_powered():
 
 
 def get_usb_dev_path(sysfs_glob="/sys/bus/usb/devices/*"):
-    """Locate the /dev/bus/usb/BBB/DDD node for 06cb:0081 directly via sysfs (with lsusb fallback)."""
+    """Locate the /dev/bus/usb/BBB/DDD node for 06cb:0081 directly via sysfs."""
     for p in sorted(glob.glob(sysfs_glob)):
         try:
             with open(os.path.join(p, "idVendor"), encoding="utf-8") as fv, open(
@@ -575,16 +555,6 @@ def get_usb_dev_path(sysfs_glob="/sys/bus/usb/devices/*"):
                         return f"/dev/bus/usb/{bus:03d}/{dev:03d}"
         except (OSError, IOError, ValueError):
             continue
-
-    try:
-        lsusb = subprocess.check_output(["lsusb"], text=True)
-    except Exception:
-        return None
-    for line in lsusb.splitlines():
-        if "06cb:0081" in line.lower():
-            m = re.search(r"Bus\s+(\d+)\s+Device\s+(\d+)", line)
-            if m:
-                return f"/dev/bus/usb/{int(m.group(1)):03d}/{int(m.group(2)):03d}"
     return None
 
 
@@ -813,9 +783,6 @@ def build_auth_policy(ident_map, target_user, uid_lookup=None):
             # Truncated hardware label for target_user (e.g. "alexander": ["alexand"])
             # Bind strictly to target_user's Linux UID to prevent 7-char prefix collisions.
             rules.append({"uid": target_uid, "labels": labels, "alias": alias})
-        else:
-            # Explicitly configured non-Linux legacy hardware label (e.g. "Unicorn")
-            rules.append({"uid": None, "labels": labels, "alias": alias})
 
     return rules, all_identities, uid_to_user
 
@@ -823,25 +790,17 @@ def build_auth_policy(ident_map, target_user, uid_lookup=None):
 def evaluate_match(rules, matched_rid, matched_label):
     """
     Evaluate whether an on-chip match (rid, label) satisfies any authorization rule.
-    For UID-bound rules, matched_rid MUST strictly match the expected Linux UID,
+    Every rule requires matched_rid to strictly match the expected Linux UID,
     preventing 7-character username prefix collisions across different accounts.
     """
-    if not rules:
-        return False
-    if matched_rid is None and not matched_label:
+    if not rules or matched_rid is None:
         return False
 
     for rule in rules:
-        req_uid = rule["uid"]
-        req_labels = rule["labels"]
-        if req_uid is not None:
-            if matched_rid != req_uid:
-                continue
-            if matched_label is None or matched_label in req_labels:
-                return True
-        else:
-            if matched_label is not None and matched_label in req_labels:
-                return True
+        if matched_rid != rule["uid"]:
+            continue
+        if matched_label is None or matched_label in rule["labels"]:
+            return True
 
     return False
 
