@@ -60,17 +60,17 @@ echo "=========================================================="
 
 # 1. Hardware Detection
 echo "[1/7] Detecting Synaptics 06cb:0081 USB sensor..."
-if ! lsusb | grep -qi -E "06cb:0081|Synaptics.*0081"; then
+if ! lsusb | grep -qi "06cb:0081"; then
     echo "Warning: Synaptics 06cb:0081 USB sensor was not found in 'lsusb'."
     echo "Continuing anyway in case the device is temporarily powered off..."
 else
-    echo "Found sensor: $(lsusb | grep -i -E '06cb:0081|Synaptics.*0081')"
+    echo "Found sensor: $(lsusb | grep -i '06cb:0081')"
 fi
 
 # 2. Prerequisites Check
 echo "[2/7] Checking system dependencies..."
 MISSING_PKGS=()
-for cmd in podman python3 lsusb zstd fuse-overlayfs; do
+for cmd in podman python3 lsusb usbreset zstd fuse-overlayfs innoextract; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
         MISSING_PKGS+=("$cmd")
     fi
@@ -83,13 +83,13 @@ if [ ${#MISSING_PKGS[@]} -gt 0 ]; then
     echo "Missing required utilities: ${MISSING_PKGS[*]}"
     if command -v dnf >/dev/null 2>&1; then
         echo "Installing missing packages with DNF..."
-        dnf install -y podman python3 usbutils zstd fuse-overlayfs curl
+        dnf install -y podman python3 usbutils zstd fuse-overlayfs innoextract curl
     elif command -v apt-get >/dev/null 2>&1; then
         echo "Installing missing packages with APT..."
-        apt-get update && apt-get install -y podman python3 usbutils zstd fuse-overlayfs curl
+        apt-get update && apt-get install -y podman python3 usbutils zstd fuse-overlayfs innoextract curl
     elif command -v pacman >/dev/null 2>&1; then
         echo "Installing missing packages with Pacman..."
-        pacman -S --needed --noconfirm podman python usbutils zstd fuse-overlayfs curl
+        pacman -S --needed --noconfirm podman python usbutils zstd fuse-overlayfs innoextract curl
     else
         echo "Please install ${MISSING_PKGS[*]} using your distribution package manager." >&2
         exit 1
@@ -149,7 +149,7 @@ echo "[6/7] Installing Udev rules, sleep hooks, and CLI tools..."
 rm -f /etc/udev/rules.d/99-synaptics-fingerprint.rules
 install -o root -g root -m 644 "${SCRIPT_DIR}/udev/70-synaptics-bio.rules" /etc/udev/rules.d/70-synaptics-bio.rules
 udevadm control --reload-rules 2>/dev/null || true
-udevadm trigger 2>/dev/null || true
+udevadm trigger --action=change --subsystem-match=usb --attr-match=idVendor=06cb --attr-match=idProduct=0081 2>/dev/null || true
 
 install -o root -g root -m 755 "${SCRIPT_DIR}/bin/synaptics-bio-auth" /usr/local/bin/synaptics-bio-auth
 install -o root -g root -m 755 "${SCRIPT_DIR}/bin/synaptics-bio-enroll" /usr/local/bin/synaptics-bio-enroll
@@ -200,12 +200,18 @@ echo "[7/7] Configuring PAM authentication stack..."
 PAM_SUDO="/etc/pam.d/sudo"
 if [ ! -f "${PAM_SUDO}" ] && [ -f "/usr/lib/pam.d/sudo" ]; then
     cp -p "/usr/lib/pam.d/sudo" "${PAM_SUDO}"
+    touch "${OPT_DIR}/.created-pam-sudo"
 fi
 if [ -f "${PAM_SUDO}" ]; then
     if grep -q "synaptics-bio-auth" "${PAM_SUDO}"; then
         echo "${PAM_SUDO} is already configured."
     elif insert_pam_auth_rule "${PAM_SUDO}" "auth       sufficient   pam_exec.so quiet stdout /usr/local/bin/synaptics-bio-auth"; then
-        echo "Configured ${PAM_SUDO} (backup: ${PAM_SUDO}.orig-bio)."
+        if [ -f "${OPT_DIR}/.created-pam-sudo" ]; then
+            rm -f "${PAM_SUDO}.orig-bio"
+            echo "Configured ${PAM_SUDO} from /usr/lib/pam.d/sudo."
+        else
+            echo "Configured ${PAM_SUDO} (backup: ${PAM_SUDO}.orig-bio)."
+        fi
     fi
 fi
 
@@ -213,6 +219,7 @@ PAM_KDE="/etc/pam.d/kde"
 PAM_KDE_FP="/etc/pam.d/kde-fingerprint"
 if [ ! -f "${PAM_KDE_FP}" ] && [ -f "/usr/lib/pam.d/kde-fingerprint" ]; then
     cp -p "/usr/lib/pam.d/kde-fingerprint" "${PAM_KDE_FP}"
+    touch "${OPT_DIR}/.created-pam-kde-fp"
 fi
 
 if [ -f "${PAM_KDE_FP}" ]; then
@@ -226,19 +233,25 @@ if [ -f "${PAM_KDE_FP}" ]; then
         fi
         echo "Restored ${PAM_KDE} to pure password-auth (migrated lockscreen biometric auth to ${PAM_KDE_FP})."
     fi
-    if [ ! -f "${PAM_KDE_FP}.orig-bio" ] && ! grep -q "synaptics-bio-auth" "${PAM_KDE_FP}"; then
+    if [ ! -f "${OPT_DIR}/.created-pam-kde-fp" ] && [ ! -f "${PAM_KDE_FP}.orig-bio" ] && ! grep -q "synaptics-bio-auth" "${PAM_KDE_FP}"; then
         cp -p "${PAM_KDE_FP}" "${PAM_KDE_FP}.orig-bio"
     fi
 
     # Preserve the distribution's existing account/password/session lines in kde-fingerprint
     # while replacing only the auth stack with non-interactive synaptics-bio-auth --lockscreen.
     SRC_KDE_FP="${PAM_KDE_FP}.orig-bio"
-    [ ! -f "${SRC_KDE_FP}" ] && SRC_KDE_FP="${PAM_KDE_FP}"
+    if [ ! -f "${SRC_KDE_FP}" ]; then
+        if [ -f "/usr/lib/pam.d/kde-fingerprint" ] && [ -f "${OPT_DIR}/.created-pam-kde-fp" ]; then
+            SRC_KDE_FP="/usr/lib/pam.d/kde-fingerprint"
+        else
+            SRC_KDE_FP="${PAM_KDE_FP}"
+        fi
+    fi
     {
         echo "#%PAM-1.0"
         echo "auth        required      pam_env.so"
-        echo "auth        sufficient    pam_exec.so quiet stdout /usr/local/bin/synaptics-bio-auth --lockscreen"
-        echo "auth        required      pam_deny.so"
+        echo "auth        [success=1 default=ignore] pam_exec.so quiet stdout /usr/local/bin/synaptics-bio-auth --lockscreen"
+        echo "auth        requisite     pam_deny.so"
         if grep -qE '^[[:space:]]*auth[[:space:]]+include[[:space:]]+postlogin' "${SRC_KDE_FP}"; then
             echo "auth        include       postlogin"
         fi
@@ -246,7 +259,7 @@ if [ -f "${PAM_KDE_FP}" ]; then
     } > "${PAM_KDE_FP}.tmp"
     mv "${PAM_KDE_FP}.tmp" "${PAM_KDE_FP}"
     chmod 644 "${PAM_KDE_FP}"
-    echo "Configured ${PAM_KDE_FP} (backup: ${PAM_KDE_FP}.orig-bio)."
+    echo "Configured ${PAM_KDE_FP}."
 elif [ -f "${PAM_KDE}" ] || [ -f "/usr/lib/pam.d/kde" ]; then
     if [ ! -f "${PAM_KDE}" ] && [ -f "/usr/lib/pam.d/kde" ]; then
         cp -p "/usr/lib/pam.d/kde" "${PAM_KDE}"

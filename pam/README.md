@@ -41,8 +41,8 @@ session    include      system-auth
 KDE Plasma 6 runs two parallel `kscreenlocker_worker` PAM sessions: `/etc/pam.d/kde` (interactive password) and `/etc/pam.d/kde-fingerprint` (non-interactive fingerprint). Keep `/etc/pam.d/kde` as pure `password-auth` so typed passwords are accepted immediately at any time, and configure `/etc/pam.d/kde-fingerprint` with `--lockscreen`:
 ```pam
 auth        required      pam_env.so
-auth        sufficient    pam_exec.so quiet stdout /usr/local/bin/synaptics-bio-auth --lockscreen
-auth        required      pam_deny.so
+auth        [success=1 default=ignore] pam_exec.so quiet stdout /usr/local/bin/synaptics-bio-auth --lockscreen
+auth        requisite     pam_deny.so
 auth        include       postlogin
 ```
 

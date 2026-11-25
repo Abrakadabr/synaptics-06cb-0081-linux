@@ -22,6 +22,9 @@ if [ -f "${PAM_SUDO}" ]; then
     if [ -f "${PAM_SUDO}.orig-bio" ]; then
         mv "${PAM_SUDO}.orig-bio" "${PAM_SUDO}"
         echo "Restored ${PAM_SUDO} from original backup."
+    elif [ -f "/opt/synaptics-bio/.created-pam-sudo" ] && [ -f "/usr/lib/pam.d/sudo" ]; then
+        rm -f "${PAM_SUDO}"
+        echo "Removed installer-created ${PAM_SUDO} (restoring /usr/lib/pam.d/sudo)."
     else
         sed -i '/synaptics-bio-auth/d' "${PAM_SUDO}"
         echo "Removed synaptics-bio-auth rule from ${PAM_SUDO}."
@@ -45,6 +48,9 @@ if [ -f "${PAM_KDE_FP}" ]; then
     if [ -f "${PAM_KDE_FP}.orig-bio" ]; then
         mv "${PAM_KDE_FP}.orig-bio" "${PAM_KDE_FP}"
         echo "Restored ${PAM_KDE_FP} from original backup."
+    elif [ -f "/opt/synaptics-bio/.created-pam-kde-fp" ] && [ -f "/usr/lib/pam.d/kde-fingerprint" ]; then
+        rm -f "${PAM_KDE_FP}"
+        echo "Removed installer-created ${PAM_KDE_FP} (restoring /usr/lib/pam.d/kde-fingerprint)."
     else
         sed -i '/synaptics-bio-auth/d' "${PAM_KDE_FP}"
         echo "Removed synaptics-bio-auth rule from ${PAM_KDE_FP}."

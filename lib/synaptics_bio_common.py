@@ -26,19 +26,32 @@ IMAGE_CANDIDATES = [
     "wine:validity",
     "ghcr.io/abrakadabr/synaptics-06cb-0081-linux:latest",
 ]
-IDENTITY_LABEL_RE = re.compile(r"^[a-zA-Z0-9_\-\.]{1,32}$")
+IDENTITY_LABEL_RE = re.compile(r"^[a-zA-Z0-9_\-\.@]{1,32}$")
+MAX_WINBIO_RID = 0x7FFFFFFF
 
 # Expected original bytes in src/enroll.exe to prevent silent corruption if binary changes
 _ENROLL_EXPECTED_ORIG = {
     0x1413: bytes.fromhex("ed040000"),
     0x143A: bytes.fromhex("f6000000"),
     0x1447: bytes.fromhex("0800000048ba556e69636f726e00"),
+    0x3EAA: bytes.fromhex("ffd0"),
+    0x3EBD: bytes.fromhex("9090"),
 }
 _DELETE_EXPECTED_ORIG = {
     0x2423: bytes.fromhex("ed040000"),
     0x244A: bytes.fromhex("f6000000"),
+    0x3EAA: bytes.fromhex("ffd0"),
     0x3EB8: bytes.fromhex("e802d8ffff"),
+    0x3EBD: bytes.fromhex("9090"),
 }
+
+
+def truncate_utf8_label(text, max_bytes=7):
+    """Truncate text to at most max_bytes of valid UTF-8 without splitting a codepoint."""
+    raw = text.encode("utf-8")
+    if len(raw) <= max_bytes:
+        return text
+    return raw[:max_bytes].decode("utf-8", errors="ignore")
 
 
 def resolve_opt_dir(script_file):
@@ -546,17 +559,32 @@ def ensure_usb_powered():
             continue
 
 
-def get_usb_dev_path():
-    """Locate the /dev/bus/usb/BBB/DDD node for 06cb:0081 via lsusb."""
+def get_usb_dev_path(sysfs_glob="/sys/bus/usb/devices/*"):
+    """Locate the /dev/bus/usb/BBB/DDD node for 06cb:0081 directly via sysfs (with lsusb fallback)."""
+    for p in sorted(glob.glob(sysfs_glob)):
+        try:
+            with open(os.path.join(p, "idVendor"), encoding="utf-8") as fv, open(
+                os.path.join(p, "idProduct"), encoding="utf-8"
+            ) as fp:
+                if fv.read().strip().lower() == "06cb" and fp.read().strip().lower() == "0081":
+                    with open(os.path.join(p, "busnum"), encoding="utf-8") as fb, open(
+                        os.path.join(p, "devnum"), encoding="utf-8"
+                    ) as fd:
+                        bus = int(fb.read().strip())
+                        dev = int(fd.read().strip())
+                        return f"/dev/bus/usb/{bus:03d}/{dev:03d}"
+        except (OSError, IOError, ValueError):
+            continue
+
     try:
         lsusb = subprocess.check_output(["lsusb"], text=True)
     except Exception:
         return None
     for line in lsusb.splitlines():
-        if "06cb:0081" in line.lower() or ("synaptics" in line.lower() and "0081" in line.lower()):
+        if "06cb:0081" in line.lower():
             m = re.search(r"Bus\s+(\d+)\s+Device\s+(\d+)", line)
             if m:
-                return f"/dev/bus/usb/{m.group(1)}/{m.group(2)}"
+                return f"/dev/bus/usb/{int(m.group(1)):03d}/{int(m.group(2)):03d}"
     return None
 
 
@@ -746,8 +774,9 @@ def build_auth_policy(ident_map, target_user, uid_lookup=None):
         if not isinstance(user, str) or user.startswith("_"):
             continue
         all_identities.add(user)
-        if len(user) > 7:
-            all_identities.add(user[:7])
+        trunc_user = truncate_utf8_label(user, 7)
+        if trunc_user != user and trunc_user:
+            all_identities.add(trunc_user)
         u_uid = uid_lookup(user)
         if u_uid is not None:
             uid_to_user[u_uid] = user
@@ -756,8 +785,9 @@ def build_auth_policy(ident_map, target_user, uid_lookup=None):
                 if not isinstance(alias, str) or not alias:
                     continue
                 all_identities.add(alias)
-                if len(alias) > 7:
-                    all_identities.add(alias[:7])
+                trunc_alias = truncate_utf8_label(alias, 7)
+                if trunc_alias != alias and trunc_alias:
+                    all_identities.add(trunc_alias)
                 a_uid = uid_lookup(alias)
                 if a_uid is not None and a_uid not in uid_to_user:
                     uid_to_user[a_uid] = alias
@@ -767,17 +797,19 @@ def build_auth_policy(ident_map, target_user, uid_lookup=None):
         return rules, all_identities, uid_to_user
 
     target_uid = uid_lookup(target_user)
+    target_trunc = truncate_utf8_label(target_user, 7)
     for alias in target_aliases:
         if not isinstance(alias, str) or not alias:
             continue
         labels = {alias}
-        if len(alias) > 7:
-            labels.add(alias[:7])
+        trunc_alias = truncate_utf8_label(alias, 7)
+        if trunc_alias != alias and trunc_alias:
+            labels.add(trunc_alias)
 
         alias_uid = uid_lookup(alias)
         if alias_uid is not None:
             rules.append({"uid": alias_uid, "labels": labels, "alias": alias})
-        elif target_uid is not None and alias == target_user[:7]:
+        elif target_uid is not None and alias == target_trunc:
             # Truncated hardware label for target_user (e.g. "alexander": ["alexand"])
             # Bind strictly to target_user's Linux UID to prevent 7-char prefix collisions.
             rules.append({"uid": target_uid, "labels": labels, "alias": alias})
@@ -832,6 +864,8 @@ def patch_enroll_binary(src_path, dst_path, target_user, target_uid, finger_id=1
     """
     if not (1 <= finger_id <= 10):
         raise ValueError(f"finger_id must be between 1 and 10, got {finger_id}")
+    if not isinstance(target_uid, int) or isinstance(target_uid, bool) or not (0 <= target_uid <= MAX_WINBIO_RID):
+        raise ValueError(f"target_uid must be between 0 and {MAX_WINBIO_RID}, got {target_uid}")
 
     with open(src_path, "rb") as f:
         data = bytearray(f.read())
@@ -846,18 +880,16 @@ def patch_enroll_binary(src_path, dst_path, target_user, target_uid, finger_id=1
     data[0x143A:0x143E] = struct.pack("<I", subfactor)
 
     # 3. Patch Identity Name at 0x1447..0x1455 (length dword, 2-byte movabs opcode preserved, 8-byte padded name)
-    name_bytes = target_user.encode("utf-8")[:7] + b"\x00"
+    name_bytes = truncate_utf8_label(target_user, 7).encode("utf-8") + b"\x00"
     name_padded = name_bytes.ljust(8, b"\x00")
     data[0x1447:0x144B] = struct.pack("<I", len(name_bytes))
     data[0x144D:0x1455] = name_padded
 
     # 4. Patch Sleep(3000) at 0x3eaa: ff d0 -> 90 90
-    if data[0x3EAA:0x3EAC] == b"\xff\xd0":
-        data[0x3EAA:0x3EAC] = b"\x90\x90"
+    data[0x3EAA:0x3EAC] = b"\x90\x90"
 
     # 5. Patch jump over Sleep(10000) + identify() at 0x3ebd: 90 90 -> eb 41
-    if data[0x3EBD:0x3EBF] == b"\x90\x90":
-        data[0x3EBD:0x3EBF] = b"\xeb\x41"
+    data[0x3EBD:0x3EBF] = b"\xeb\x41"
 
     with open(dst_path, "wb") as f:
         f.write(data)
@@ -871,6 +903,8 @@ def patch_delete_binary(src_path, dst_path, target_uid, finger_id=None):
     """
     if finger_id is not None and finger_id not in (0, 0xFF) and not (1 <= finger_id <= 10):
         raise ValueError(f"finger_id must be 1..10 or None/0/0xff, got {finger_id}")
+    if not isinstance(target_uid, int) or isinstance(target_uid, bool) or not (0 <= target_uid <= MAX_WINBIO_RID):
+        raise ValueError(f"target_uid must be between 0 and {MAX_WINBIO_RID}, got {target_uid}")
 
     with open(src_path, "rb") as f:
         data = bytearray(f.read())
@@ -893,12 +927,10 @@ def patch_delete_binary(src_path, dst_path, target_uid, finger_id=None):
     data[0x244A:0x244E] = struct.pack("<I", subfactor)
 
     # 4. Patch Sleep(3000) at 0x3eaa: ff d0 -> 90 90
-    if data[0x3EAA:0x3EAC] == b"\xff\xd0":
-        data[0x3EAA:0x3EAC] = b"\x90\x90"
+    data[0x3EAA:0x3EAC] = b"\x90\x90"
 
     # 5. Patch jump over Sleep(10000) + identify() at 0x3ebd: 90 90 -> eb 41
-    if data[0x3EBD:0x3EBF] == b"\x90\x90":
-        data[0x3EBD:0x3EBF] = b"\xeb\x41"
+    data[0x3EBD:0x3EBF] = b"\xeb\x41"
 
     with open(dst_path, "wb") as f:
         f.write(data)

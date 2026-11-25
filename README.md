@@ -87,7 +87,7 @@ sudo bash install.sh
 
 The installer will automatically:
 1. Verify `06cb:0081` hardware presence via `lsusb`.
-2. Check and install system prerequisites (`podman`, `python3`, `usbutils`, `zstd`) across Fedora, Ubuntu, Debian, or Arch Linux.
+2. Check and install system prerequisites (`podman`, `python3`, `usbutils`, `zstd`, `fuse-overlayfs`, `innoextract`, `curl`) across Fedora, Ubuntu, Debian, or Arch Linux.
 3. Set up `/opt/synaptics-bio` structure and secure configuration permissions (`0755` directory, `0644` configs).
 4. Download the official Lenovo OEM driver (`huy103af07m6.exe`), extract required DLLs, verify SHA-256 checksums, and apply the Wine UMDF crash patch.
 5. Configure shared multi-user static container storage in `/usr/share/synaptics-bio/containers-storage` (`localhost/wine:validity`).
@@ -134,11 +134,11 @@ Example output:
 ==========================================================
 User: alex (UID: 1000)
   Enrolled finger slots : #1
-  Hardware SID labels   : alex
+  Authorized identities : alex
 ----------------------------------------------------------
 User: kate (UID: 1001)
   Enrolled finger slots : #1, #2
-  Hardware SID labels   : kate
+  Authorized identities : kate
 ----------------------------------------------------------
 ```
 

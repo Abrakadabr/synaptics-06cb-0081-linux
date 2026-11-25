@@ -191,6 +191,21 @@ class TestBinaryPatchersAndIdentities(unittest.TestCase):
             with self.assertRaises(ValueError):
                 bio.patch_delete_binary(bad_src, d_dst, 1000, 1)
 
+            # Reject UIDs >= 2^31 (prevents 64-bit sign-extension in mov QWORD [rbp+0x40], imm32) or negative UIDs
+            with self.assertRaises(ValueError):
+                bio.patch_enroll_binary(enroll_src, e_dst, "alex", 0x80000000, 1)
+            with self.assertRaises(ValueError):
+                bio.patch_delete_binary(enroll_src, d_dst, -1, 1)
+
+            # UTF-8 codepoint boundary safe truncation + domain '@' username support
+            bio.patch_enroll_binary(enroll_src, e_dst, "alex@corp.local", 1006, finger_id=1)
+            with open(e_dst, "rb") as f:
+                ed_dom = f.read()
+            self.assertEqual(ed_dom[0x144D:0x1455], b"alex@co\x00")
+            self.assertEqual(bio.truncate_utf8_label("aabbcc\u00e9", 7), "aabbcc")
+            res_dom = bio.parse_identify_buffer(_make_identify_line(1006, "alex@co", rc=0))
+            self.assertEqual(res_dom["label"], "alex@co")
+
     def test_identities_update_and_delete(self):
         with tempfile.TemporaryDirectory() as tmp:
             bio.update_identities_file(tmp, "kate", 1)
@@ -468,6 +483,57 @@ class TestHelperScripts(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(os.stat(cal).st_mode), 0o644)
             self.assertEqual(stat.S_IMODE(os.stat(ts).st_mode), 0o644)
             self.assertEqual(auth_mod._build_container_mounts(tmp, uid=0), ["-v", f"{tmp}:{tmp}:ro"])
+
+    def test_sysfs_usb_discovery_and_calibration_extractor(self):
+        ext_mod = _load_script_module("scripts/extract-calibration.py", "extract_calibration")
+        with tempfile.TemporaryDirectory() as tmp:
+            # 1. Verify sysfs USB device path discovery
+            other_dev = os.path.join(tmp, "1-1")
+            syna_dev = os.path.join(tmp, "1-4")
+            os.makedirs(other_dev)
+            os.makedirs(syna_dev)
+            for d, vid, pid_s, bus, dev in (
+                (other_dev, "06cb", "c008", "1", "81"),
+                (syna_dev, "06cb", "0081", "1", "5"),
+            ):
+                with open(os.path.join(d, "idVendor"), "w", encoding="utf-8") as f:
+                    f.write(vid + "\n")
+                with open(os.path.join(d, "idProduct"), "w", encoding="utf-8") as f:
+                    f.write(pid_s + "\n")
+                with open(os.path.join(d, "busnum"), "w", encoding="utf-8") as f:
+                    f.write(bus + "\n")
+                with open(os.path.join(d, "devnum"), "w", encoding="utf-8") as f:
+                    f.write(dev + "\n")
+            self.assertEqual(bio.get_usb_dev_path(os.path.join(tmp, "*")), "/dev/bus/usb/001/005")
+
+            # 2. Verify extract-calibration skips prefix inline DWORDs ('CalibrationDataVersion')
+            #    and extracts the real allocated binary 'CalibrationData' cell
+            hive = bytearray(0x4000)
+            # Fake allocated inline DWORD vk cell at offset 0x1100: CalibrationDataVersion = 1
+            off1 = 0x1100
+            struct.pack_into("<i", hive, off1 - 4, -48)
+            struct.pack_into("<2sHIIIHH", hive, off1, b"vk", 22, 0x80000004, 1, 4, 1, 0)
+            hive[off1 + 20 : off1 + 42] = b"CalibrationDataVersion"
+
+            # Real data cell at hive cell offset 0x0500 (file offset 0x1500)
+            payload = b"\xaa\x55" * 600  # 1200 bytes
+            data_cell_file_off = 0x1000 + 0x0500
+            struct.pack_into("<i", hive, data_cell_file_off, -(len(payload) + 4))
+            hive[data_cell_file_off + 4 : data_cell_file_off + 4 + len(payload)] = payload
+
+            # Real allocated vk cell at file offset 0x1200
+            off2 = 0x1200
+            struct.pack_into("<i", hive, off2 - 4, -40)
+            struct.pack_into("<2sHIIIHH", hive, off2, b"vk", 15, len(payload), 0x0500, 3, 1, 0)
+            hive[off2 + 20 : off2 + 35] = b"CalibrationData"
+
+            hive_path = os.path.join(tmp, "SYSTEM")
+            out_blob = os.path.join(tmp, "out.blob")
+            with open(hive_path, "wb") as f:
+                f.write(hive)
+            self.assertTrue(ext_mod.extract_calibration(hive_path, out_blob))
+            with open(out_blob, "rb") as f:
+                self.assertEqual(f.read(), payload)
 
 
 if __name__ == "__main__":

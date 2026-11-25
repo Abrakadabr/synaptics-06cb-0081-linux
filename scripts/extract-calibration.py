@@ -20,10 +20,14 @@ import hashlib
 class RegHive:
     def __init__(self, data):
         self.data = data
+
     def read_cell(self, off):
         cell_off = 0x1000 + off
-        sz = struct.unpack('<i', self.data[cell_off:cell_off+4])[0]
-        return self.data[cell_off+4 : cell_off + abs(sz)]
+        if cell_off < 0 or cell_off + 4 > len(self.data):
+            raise ValueError(f"Invalid registry cell offset 0x{off:x}")
+        sz = struct.unpack("<i", self.data[cell_off : cell_off + 4])[0]
+        end_off = min(len(self.data), cell_off + abs(sz))
+        return self.data[cell_off + 4 : end_off]
 
 def find_system_hive():
     candidates = [
@@ -43,10 +47,11 @@ def extract_calibration(hive_path, output_path="CalibrationData.blob"):
     with open(hive_path, "rb") as f:
         data = f.read()
 
+    target_name = b"CalibrationData"
     search_pos = 0
     vk_match = None
     while True:
-        idx = data.find(b"CalibrationData", search_pos)
+        idx = data.find(target_name, search_pos)
         if idx == -1:
             break
         search_pos = idx + 1
@@ -57,10 +62,15 @@ def extract_calibration(hive_path, output_path="CalibrationData.blob"):
         # Allocated registry cells have negative size; positive size indicates free/deleted cells
         if cell_size >= 0:
             continue
-        magic, nlen, dlen, doff, dtype, flags = struct.unpack("<2sHIIIH", data[vk_off : vk_off + 18])
-        if magic == b"vk":
-            vk_match = (nlen, dlen & 0x7FFFFFFF, doff, dtype, flags)
-            break
+        magic, nlen, raw_dlen, doff, dtype, flags = struct.unpack("<2sHIIIH", data[vk_off : vk_off + 18])
+        # Require exact name length, non-inline binary payload (bit 31 clear), and realistic blob size
+        if magic != b"vk" or nlen != len(target_name) or (raw_dlen & 0x80000000):
+            continue
+        dlen = raw_dlen & 0x7FFFFFFF
+        if dlen < 1000:
+            continue
+        vk_match = (nlen, dlen, doff, dtype, flags)
+        break
 
     if vk_match is None:
         print("Error: Could not locate valid allocated 'vk' value cell for CalibrationData.", file=sys.stderr)
