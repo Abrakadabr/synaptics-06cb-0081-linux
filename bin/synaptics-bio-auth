@@ -174,22 +174,8 @@ def main():
     except Exception:
         pass
 
-    if uid == 0:
-        log_file = "/var/log/synaptics-bio-auth.log"
-        if not os.access(os.path.dirname(log_file), os.W_OK):
-            log_file = os.path.join(bio.RUN_BIO_DIR, "auth.log")
-    else:
-        user_run = f"/run/user/{uid}"
-        if os.path.isdir(user_run) and os.access(user_run, os.W_OK):
-            log_file = os.path.join(user_run, "synaptics-bio-auth.log")
-        else:
-            log_file = None
-
-    def write_log(msg):
-        if log_file:
-            bio.secure_append_log(log_file, msg)
-
     # If running with root effective privileges under PAM, adopt full root credentials
+    # BEFORE checking /var/log write access (os.access checks real UID unless setuid(0) ran).
     if os.geteuid() == 0:
         try:
             os.setgid(0)
@@ -209,6 +195,21 @@ def main():
                             os.remove(check_f)
                 except Exception:
                     pass
+
+    if uid == 0:
+        log_file = "/var/log/synaptics-bio-auth.log"
+        if not os.access(os.path.dirname(log_file), os.W_OK, effective_ids=True):
+            log_file = os.path.join(bio.RUN_BIO_DIR, "auth.log")
+    else:
+        user_run = f"/run/user/{uid}"
+        if os.path.isdir(user_run) and os.access(user_run, os.W_OK, effective_ids=True):
+            log_file = os.path.join(user_run, "synaptics-bio-auth.log")
+        else:
+            log_file = None
+
+    def write_log(msg):
+        if log_file:
+            bio.secure_append_log(log_file, msg)
 
     # Rotate log if larger than 1MB to prevent unbounded growth
     if log_file:

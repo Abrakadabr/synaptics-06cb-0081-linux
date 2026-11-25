@@ -168,7 +168,7 @@ def main():
         pass
 
     log_file = "/var/log/synaptics-bio-enroll.log"
-    if not os.access(os.path.dirname(log_file), os.W_OK):
+    if not os.access(os.path.dirname(log_file), os.W_OK, effective_ids=True):
         log_file = os.path.join(bio.RUN_BIO_DIR, "enroll.log")
 
     print("==========================================================")
