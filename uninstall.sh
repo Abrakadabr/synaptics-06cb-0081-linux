@@ -93,9 +93,8 @@ if [ -d "/var/lib/synaptics-bio" ]; then
 fi
 # Safely untag our images from legacy /usr/share/containers/storage without deleting unrelated images
 if [ -d "/usr/share/containers/storage/overlay-images" ] && command -v podman >/dev/null 2>&1; then
-    podman --root /usr/share/containers/storage --runroot /run/synaptics-bio/uninstall-run \
+    podman --root /usr/share/containers/storage --runroot /run/containers/storage \
         rmi localhost/wine:validity wine:validity ghcr.io/abrakadabr/synaptics-06cb-0081-linux:latest 2>/dev/null || true
-    rm -rf /run/synaptics-bio/uninstall-run 2>/dev/null || true
 fi
 echo "Cleaned up container storage state."
 

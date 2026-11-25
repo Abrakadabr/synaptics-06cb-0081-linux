@@ -39,6 +39,7 @@ IMAGE_NAME="localhost/wine:validity"
 
 STATIC_STORE="/usr/share/synaptics-bio/containers-storage"
 LEGACY_STORE="/usr/share/containers/storage"
+LEGACY_RUN_ROOT="/run/containers/storage"
 RUN_ROOT="/run/synaptics-bio/containers-setup-run"
 
 echo "=========================================================="
@@ -62,9 +63,9 @@ if [ "${FORCE}" -eq 1 ] || ! podman --root "${STATIC_STORE}" --runroot "${RUN_RO
     if [ -f "${ARCHIVE_PATH}" ]; then
         echo "[1/3] Loading Wine runtime image from ${ARCHIVE_PATH} into ${STATIC_STORE}..."
         zstdcat "${ARCHIVE_PATH}" | podman --root "${STATIC_STORE}" --runroot "${RUN_ROOT}" load
-    elif [ -d "${LEGACY_STORE}/overlay-images" ] && podman --root "${LEGACY_STORE}" --runroot "${RUN_ROOT}" image exists "${IMAGE_NAME}" 2>/dev/null; then
+    elif [ -d "${LEGACY_STORE}/overlay-images" ] && podman --root "${LEGACY_STORE}" --runroot "${LEGACY_RUN_ROOT}" image exists "${IMAGE_NAME}" 2>/dev/null; then
         echo "[1/3] Migrating existing image from legacy ${LEGACY_STORE} into ${STATIC_STORE}..."
-        podman --root "${LEGACY_STORE}" --runroot "${RUN_ROOT}" save "${IMAGE_NAME}" \
+        podman --root "${LEGACY_STORE}" --runroot "${LEGACY_RUN_ROOT}" save "${IMAGE_NAME}" \
             | podman --root "${STATIC_STORE}" --runroot "${RUN_ROOT}" load
     else
         echo "[1/3] Local archive not found. Pulling from GitHub Container Registry (${GHCR_IMAGE})..."
@@ -83,7 +84,7 @@ fi
 
 # Clean up our migrated tags from the legacy shared store without touching unrelated images
 if [ -d "${LEGACY_STORE}/overlay-images" ]; then
-    podman --root "${LEGACY_STORE}" --runroot "${RUN_ROOT}" rmi "${IMAGE_NAME}" wine:validity "${GHCR_IMAGE}" 2>/dev/null || true
+    podman --root "${LEGACY_STORE}" --runroot "${LEGACY_RUN_ROOT}" rmi "${IMAGE_NAME}" wine:validity "${GHCR_IMAGE}" 2>/dev/null || true
 fi
 rm -rf "${RUN_ROOT}"
 
