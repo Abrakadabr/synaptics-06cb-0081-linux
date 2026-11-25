@@ -38,13 +38,16 @@ def _boottime_delta():
     return 0.0
 
 
-def _build_container_mounts(opt_dir):
+def _build_container_mounts(opt_dir, uid=None):
     """
     Build container volume mounts protecting binaries and identities.json read-only.
-    If CalibrationData.blob already exists, mount opt_dir completely read-only.
+    Non-root callers or runs where CalibrationData.blob already exists always mount
+    opt_dir completely read-only.
     """
+    if uid is None:
+        uid = os.geteuid()
     cal_blob = os.path.join(opt_dir, "CalibrationData.blob")
-    if os.path.isfile(cal_blob):
+    if uid != 0 or os.path.isfile(cal_blob):
         return ["-v", f"{opt_dir}:{opt_dir}:ro"]
 
     mounts = ["-v", f"{opt_dir}:{opt_dir}"]
@@ -128,9 +131,18 @@ def main():
             break
         time.sleep(0.2)
 
+    # If running with root effective privileges under PAM (e.g. setuid polkit-agent-helper-1),
+    # adopt full root real UID/GID BEFORE acquiring locks, spawning Podman, or checking /var/log.
+    if os.geteuid() == 0:
+        try:
+            os.setgid(0)
+            os.setuid(0)
+        except Exception:
+            pass
+
     # Acquire hardware mutex lock to prevent concurrent sensor access collisions
     auth_mode = "lockscreen" if lockscreen_mode else "interactive"
-    lock_fd = bio.acquire_hardware_lock(mode=auth_mode, timeout=2.5)
+    lock_fd = bio.acquire_hardware_lock(mode=auth_mode, timeout=3.5)
     if not lock_fd:
         sys.exit(1)
 
@@ -139,6 +151,7 @@ def main():
     initial_ppid = os.getppid()
     container_name = f"synaptics-bio-auth-{pid}"
     podman_base = ["podman"]
+    container_state = {"needs_rm": False}
 
     # Sanitize environment unconditionally to isolate Podman & Wine from user sessions
     clean_env = bio.get_clean_env(uid)
@@ -148,18 +161,19 @@ def main():
     os.environ["PATH"] = clean_env["PATH"]
 
     def cleanup():
-        # Stop/remove container BEFORE releasing the hardware lock so the next caller
-        # never races with a container still holding the USB device.
-        try:
-            subprocess.run(
-                podman_base + ["rm", "-f", container_name],
-                env=clean_env,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=3,
-            )
-        except Exception:
-            pass
+        # Stop/remove container BEFORE releasing the hardware lock if still potentially active
+        if container_state["needs_rm"]:
+            try:
+                subprocess.run(
+                    podman_base + ["rm", "-f", container_name],
+                    env=clean_env,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=3,
+                )
+            except Exception:
+                pass
+            container_state["needs_rm"] = False
         bio.release_hardware_lock(lock_fd)
 
     atexit.register(cleanup)
@@ -174,15 +188,7 @@ def main():
     except Exception:
         pass
 
-    # If running with root effective privileges under PAM, adopt full root credentials
-    # BEFORE checking /var/log write access (os.access checks real UID unless setuid(0) ran).
-    if os.geteuid() == 0:
-        try:
-            os.setgid(0)
-            os.setuid(0)
-        except Exception:
-            pass
-
+    if uid == 0:
         # Clean up legacy drop-ins if they improperly reference /var/lib/containers/storage
         for check_f in (
             "/etc/containers/storage.conf.d/99-synaptics-bio.conf",
@@ -263,7 +269,7 @@ def main():
         pass
 
     image = bio.find_container_image(clean_env, podman_base)
-    container_mounts = _build_container_mounts(opt_dir)
+    container_mounts = _build_container_mounts(opt_dir, uid)
 
     success = False
     matched_identity = None
@@ -343,6 +349,7 @@ def main():
         container_failed_early = False
 
         try:
+            container_state["needs_rm"] = True
             proc = subprocess.Popen(
                 cmd,
                 cwd=opt_dir,
@@ -482,21 +489,30 @@ def main():
         except Exception as e:
             write_log(f"Exception during auth attempt {attempt}: {e}\n")
         finally:
-            if proc and proc.poll() is None:
+            clean_container_exit = False
+            if proc is not None:
+                if proc.poll() is None:
+                    try:
+                        proc.kill()
+                        proc.wait(timeout=1)
+                    except Exception:
+                        pass
+                elif proc.returncode == 0:
+                    clean_container_exit = True
+            if container_state["needs_rm"] and not clean_container_exit:
                 try:
-                    proc.kill()
+                    subprocess.run(
+                        podman_base + ["rm", "-f", container_name],
+                        env=clean_env,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=4,
+                    )
                 except Exception:
                     pass
-            try:
-                subprocess.run(
-                    podman_base + ["rm", "-f", container_name],
-                    env=clean_env,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=4,
-                )
-            except Exception:
-                pass
+            container_state["needs_rm"] = False
+            if uid == 0:
+                bio.ensure_calibration_permissions(opt_dir)
 
         if success or wrong_user_desc or container_failed_early:
             break

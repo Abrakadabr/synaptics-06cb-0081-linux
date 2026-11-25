@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Unit tests for Synaptics 06cb:0081 Linux biometric tooling."""
 
+import importlib.machinery
 import importlib.util
 import json
 import os
@@ -17,7 +18,9 @@ import synaptics_bio_common as bio  # noqa: E402
 
 
 def _load_script_module(rel_path, mod_name):
-    spec = importlib.util.spec_from_file_location(mod_name, os.path.join(REPO_ROOT, rel_path))
+    full_path = os.path.join(REPO_ROOT, rel_path)
+    loader = importlib.machinery.SourceFileLoader(mod_name, full_path)
+    spec = importlib.util.spec_from_loader(mod_name, loader)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
@@ -371,6 +374,100 @@ class TestHelperScripts(unittest.TestCase):
 
     def test_get_proc_ppid_current_process(self):
         self.assertEqual(bio.get_proc_ppid(os.getpid()), os.getppid())
+
+    def test_is_lockscreen_auth_process_strict_argv_and_uid(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pid_dir = os.path.join(tmp, "4242")
+            os.makedirs(pid_dir)
+            with open(os.path.join(pid_dir, "status"), "w", encoding="utf-8") as f:
+                f.write("Name:\tpython3\nUid:\t1000\t1000\t1000\t1000\n")
+
+            # Legitimate lockscreen helper invocation
+            with open(os.path.join(pid_dir, "cmdline"), "wb") as f:
+                f.write(b"/usr/bin/python3\x00/usr/local/bin/synaptics-bio-auth\x00--lockscreen\x00")
+            self.assertTrue(bio.is_lockscreen_auth_process(4242, expected_uid=1000, proc_root=tmp))
+            self.assertFalse(bio.is_lockscreen_auth_process(4242, expected_uid=1001, proc_root=tmp))
+            self.assertFalse(bio.is_lockscreen_auth_process(4242, expected_uid="1000", proc_root=tmp))
+
+            # Unrelated editor/command mentioning synaptics-bio-auth and --lockscreen must be rejected
+            with open(os.path.join(pid_dir, "cmdline"), "wb") as f:
+                f.write(b"/usr/bin/vim\x00/usr/local/bin/synaptics-bio-auth\x00--lockscreen\x00")
+            self.assertFalse(bio.is_lockscreen_auth_process(4242, expected_uid=1000, proc_root=tmp))
+
+            # Missing status file must fail closed
+            os.remove(os.path.join(pid_dir, "status"))
+            self.assertFalse(bio.is_lockscreen_auth_process(4242, expected_uid=1000, proc_root=tmp))
+
+    def test_hardware_lock_acquire_release_and_preemption(self):
+        import subprocess as sp
+
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = (os.path.join(tmp, "lock"), os.path.join(tmp, "meta"))
+            fd1 = bio.acquire_hardware_lock(mode="interactive", timeout=0.5, lock_paths=paths)
+            self.assertIsNotNone(fd1)
+
+            # Lockscreen caller fails immediately when lock is already held
+            self.assertIsNone(bio.acquire_hardware_lock(mode="lockscreen", timeout=0.5, lock_paths=paths))
+            bio.release_hardware_lock(fd1, lock_paths=paths)
+
+            # Spawn a child simulating a lockscreen holder that releases on SIGTERM after 0.25s,
+            # while caller passes timeout=0.1s to verify post-preemption retry still succeeds!
+            helper_dir = os.path.join(tmp, "bin")
+            os.makedirs(helper_dir)
+            fake_auth = os.path.join(helper_dir, "synaptics-bio-auth")
+            with open(fake_auth, "w", encoding="utf-8") as f:
+                f.write(
+                    "#!/usr/bin/env python3\n"
+                    "import fcntl, json, os, signal, sys, time\n"
+                    "lp, mp = sys.argv[2], sys.argv[3]\n"
+                    "fd = open(lp, 'r+')\n"
+                    "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+                    "with open(mp, 'w') as fm:\n"
+                    "    json.dump({'pid': os.getpid(), 'uid': os.geteuid(), 'mode': 'lockscreen'}, fm)\n"
+                    "sys.stdout.write('LOCKED\\n'); sys.stdout.flush()\n"
+                    "def _term(s, f):\n"
+                    "    time.sleep(0.25)\n"
+                    "    fcntl.flock(fd, fcntl.LOCK_UN); fd.close(); sys.exit(0)\n"
+                    "signal.signal(signal.SIGTERM, _term)\n"
+                    "time.sleep(10)\n"
+                )
+            os.chmod(fake_auth, 0o755)
+            child = sp.Popen([sys.executable, fake_auth, "--lockscreen", paths[0], paths[1]], stdout=sp.PIPE, text=True)
+            try:
+                self.assertEqual(child.stdout.readline().strip(), "LOCKED")
+                fd2 = bio.acquire_hardware_lock(mode="interactive", timeout=0.1, lock_paths=paths)
+                self.assertIsNotNone(fd2)
+                bio.release_hardware_lock(fd2, lock_paths=paths)
+            finally:
+                if child.stdout:
+                    child.stdout.close()
+                if child.poll() is None:
+                    child.kill()
+                child.wait()
+
+    def test_calibration_permissions_and_container_mounts(self):
+        auth_mod = _load_script_module("bin/synaptics-bio-auth", "synaptics_bio_auth")
+        with tempfile.TemporaryDirectory() as tmp:
+            cal = os.path.join(tmp, "CalibrationData.blob")
+            ts = os.path.join(tmp, "LastUpdateSystemTimeStamp.uint")
+            bad_link = os.path.join(tmp, "Symlink.uint")
+
+            # Before CalibrationData.blob exists, non-root still mounts completely :ro
+            self.assertEqual(auth_mod._build_container_mounts(tmp, uid=1000), ["-v", f"{tmp}:{tmp}:ro"])
+            self.assertEqual(auth_mod._build_container_mounts(tmp, uid=0), ["-v", f"{tmp}:{tmp}"])
+
+            with open(cal, "wb") as f:
+                f.write(b"\x01" * 16)
+            with open(ts, "w", encoding="utf-8") as f:
+                f.write("123\n")
+            os.chmod(cal, 0o600)
+            os.chmod(ts, 0o600)
+            os.symlink(cal, bad_link)
+
+            bio.ensure_calibration_permissions(tmp)
+            self.assertEqual(stat.S_IMODE(os.stat(cal).st_mode), 0o644)
+            self.assertEqual(stat.S_IMODE(os.stat(ts).st_mode), 0o644)
+            self.assertEqual(auth_mod._build_container_mounts(tmp, uid=0), ["-v", f"{tmp}:{tmp}:ro"])
 
 
 if __name__ == "__main__":

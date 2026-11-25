@@ -273,10 +273,10 @@ def get_proc_ppid(pid):
         return None
 
 
-def get_proc_euid(pid):
+def get_proc_euid(pid, proc_root="/proc"):
     """Read effective UID of pid from kernel-owned /proc/<pid>/status."""
     try:
-        with open(f"/proc/{pid}/status", "r", encoding="utf-8", errors="ignore") as f:
+        with open(os.path.join(proc_root, str(pid), "status"), "r", encoding="utf-8", errors="ignore") as f:
             for line in f:
                 if line.startswith("Uid:"):
                     parts = line.split()
@@ -287,27 +287,71 @@ def get_proc_euid(pid):
     return None
 
 
-def is_lockscreen_auth_process(pid, expected_uid=None):
+def _extract_auth_script_arg(args):
+    """Return the invoked script argument from /proc/<pid>/cmdline argv, skipping python interpreter flags."""
+    if not args:
+        return None
+    prog = os.path.basename(args[0])
+    if prog.startswith("python"):
+        for candidate in args[1:4]:
+            if not candidate.startswith("-"):
+                return candidate
+        return None
+    return args[0]
+
+
+def is_lockscreen_auth_process(pid, expected_uid=None, proc_root="/proc"):
     """
-    Verify via kernel-owned /proc/<pid>/cmdline (and optionally UID) that pid is
-    synaptics-bio-auth running in --lockscreen mode.
+    Verify via kernel-owned /proc/<pid>/cmdline and /proc/<pid>/status that pid is
+    genuinely synaptics-bio-auth running in --lockscreen mode.
+    Fails closed if UID cannot be determined or does not match expected_uid.
     """
     try:
-        if expected_uid is not None:
-            actual_uid = get_proc_euid(pid)
-            if actual_uid is not None and actual_uid != expected_uid:
-                return False
-        with open(f"/proc/{pid}/cmdline", "rb") as f:
-            args = [a.decode("utf-8", errors="ignore") for a in f.read().split(b"\x00") if a]
-        if not args:
+        actual_uid = get_proc_euid(pid, proc_root=proc_root)
+        if actual_uid is None:
             return False
-        has_auth = any(
-            a == "/usr/local/bin/synaptics-bio-auth" or os.path.basename(a) == "synaptics-bio-auth"
-            for a in args
+        if expected_uid is not None:
+            if not isinstance(expected_uid, int) or actual_uid != expected_uid:
+                return False
+        with open(os.path.join(proc_root, str(pid), "cmdline"), "rb") as f:
+            args = [a.decode("utf-8", errors="ignore") for a in f.read().split(b"\x00") if a]
+        script_arg = _extract_auth_script_arg(args)
+        if not script_arg:
+            return False
+        is_auth_bin = (
+            script_arg == "/usr/local/bin/synaptics-bio-auth"
+            or os.path.basename(script_arg) == "synaptics-bio-auth"
         )
-        return has_auth and "--lockscreen" in args
+        return is_auth_bin and "--lockscreen" in args[1:]
     except Exception:
         return False
+
+
+def _send_process_signal(pid, sig, pidfd=None):
+    if pidfd is not None and hasattr(signal, "pidfd_send_signal"):
+        signal.pidfd_send_signal(pidfd, sig)
+    else:
+        os.kill(pid, sig)
+
+
+def _is_process_alive(pid, pidfd=None):
+    try:
+        _send_process_signal(pid, 0, pidfd=pidfd)
+    except OSError:
+        return False
+    # A zombie ('Z') or dead ('X') process has already closed all FDs (releasing flock)
+    # even if its parent has not called waitpid() yet.
+    try:
+        with open(f"/proc/{pid}/stat", "r", encoding="utf-8", errors="ignore") as f:
+            stat_content = f.read()
+        rparen = stat_content.rfind(")")
+        if rparen != -1:
+            state = stat_content[rparen + 2 :].split()[0]
+            if state in ("Z", "X"):
+                return False
+    except OSError:
+        return False
+    return True
 
 
 def _can_create_lock_file(path):
@@ -315,27 +359,30 @@ def _can_create_lock_file(path):
     return uid == 0 or path.startswith(f"/run/user/{uid}/")
 
 
-def acquire_hardware_lock(mode="interactive", timeout=3.0):
+def acquire_hardware_lock(mode="interactive", timeout=3.5, lock_paths=None):
     """
     Acquires an exclusive flock on the hardware lockfile to prevent concurrent
     hardware access collisions between multiple PAM / CLI callers.
     Preempts orphaned lockscreen processes when interactive calls (sudo/polkit/CLI) arrive
     or when the session has been unlocked.
     """
-    lock_path, meta_path = get_lock_paths()
+    lock_path, meta_path = lock_paths if lock_paths is not None else get_lock_paths()
+    can_create = lock_paths is not None
     start_t = time.monotonic()
+    post_preempt_retry = False
+
     while True:
         fd = None
         try:
             flags = os.O_RDWR | os.O_NOFOLLOW
-            if _can_create_lock_file(lock_path):
+            if can_create or _can_create_lock_file(lock_path):
                 flags |= os.O_CREAT
             fd_num = os.open(lock_path, flags, 0o666)
             fd = os.fdopen(fd_num, "r+")
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             try:
                 mflags = os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW
-                if _can_create_lock_file(meta_path):
+                if can_create or _can_create_lock_file(meta_path):
                     mflags |= os.O_CREAT
                 mfd = os.open(meta_path, mflags, 0o666)
                 with os.fdopen(mfd, "w", encoding="utf-8") as fm:
@@ -350,8 +397,11 @@ def acquire_hardware_lock(mode="interactive", timeout=3.0):
                 except Exception:
                     pass
 
+        if post_preempt_retry and (time.monotonic() - start_t >= timeout):
+            return None
+        post_preempt_retry = False
+
         holder_pid = None
-        holder_uid = None
         holder_mode = None
         try:
             mfd = os.open(meta_path, os.O_RDONLY | os.O_NOFOLLOW)
@@ -360,76 +410,110 @@ def acquire_hardware_lock(mode="interactive", timeout=3.0):
             if raw_meta:
                 meta = json.loads(raw_meta)
                 holder_pid = meta.get("pid")
-                holder_uid = meta.get("uid")
                 holder_mode = meta.get("mode")
         except Exception:
             pass
 
         holder_alive = False
+        pidfd = None
         if isinstance(holder_pid, int) and holder_pid > 1 and holder_pid != os.getpid():
-            try:
-                os.kill(holder_pid, 0)
-                holder_alive = True
-            except OSError:
-                holder_alive = False
-
-        if not holder_alive:
-            time.sleep(0.1)
-        else:
-            should_preempt = False
-            if holder_mode == "lockscreen" and is_lockscreen_auth_process(holder_pid, holder_uid):
-                if mode != "lockscreen":
-                    should_preempt = True
-                elif get_proc_ppid(holder_pid) == 1 or not is_screen_locked(holder_uid):
-                    should_preempt = True
-
-            if should_preempt:
-                # Send SIGTERM first and allow up to 2.0s for the holder's own atexit cleanup
-                # (important when holder runs rootless Podman under a different UID).
+            if hasattr(os, "pidfd_open"):
                 try:
-                    os.kill(holder_pid, signal.SIGTERM)
+                    pidfd = os.pidfd_open(holder_pid, 0)
                 except OSError:
-                    pass
+                    pidfd = None
+            holder_alive = _is_process_alive(holder_pid, pidfd=pidfd)
 
-                for _ in range(20):
+        try:
+            if not holder_alive:
+                time.sleep(0.1)
+            else:
+                # Derive UID from kernel /proc rather than untrusted world-writable meta file
+                actual_holder_uid = get_proc_euid(holder_pid)
+                should_preempt = False
+                if holder_mode == "lockscreen" and is_lockscreen_auth_process(holder_pid, actual_holder_uid):
+                    if mode != "lockscreen":
+                        should_preempt = True
+                    elif get_proc_ppid(holder_pid) == 1 or not is_screen_locked(actual_holder_uid):
+                        should_preempt = True
+
+                if should_preempt:
+                    # Send SIGTERM first and allow up to 2.0s for the holder's own cleanup
                     try:
-                        os.kill(holder_pid, 0)
-                        time.sleep(0.1)
-                    except OSError:
-                        break
-                else:
-                    try:
-                        os.kill(holder_pid, signal.SIGKILL)
+                        _send_process_signal(holder_pid, signal.SIGTERM, pidfd=pidfd)
                     except OSError:
                         pass
-                    if holder_uid == os.geteuid():
-                        clean_env = get_clean_env(os.geteuid())
-                        subprocess.run(
-                            ["podman", "rm", "-f", f"synaptics-bio-auth-{holder_pid}"],
-                            env=clean_env,
-                            stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL,
-                            timeout=2,
-                        )
-                    if isinstance(holder_uid, int):
-                        subprocess.run(
-                            ["pkill", "-u", str(holder_uid), "-x", "identify.exe"],
-                            stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL,
-                        )
-                time.sleep(0.1)
-            elif mode == "lockscreen":
-                return None
+
+                    for _ in range(20):
+                        if not _is_process_alive(holder_pid, pidfd=pidfd):
+                            break
+                        time.sleep(0.1)
+                    else:
+                        if pidfd is not None or is_lockscreen_auth_process(holder_pid, actual_holder_uid):
+                            try:
+                                _send_process_signal(holder_pid, signal.SIGKILL, pidfd=pidfd)
+                            except OSError:
+                                pass
+                        if actual_holder_uid == os.geteuid():
+                            clean_env = get_clean_env(os.geteuid())
+                            subprocess.run(
+                                ["podman", "rm", "-f", f"synaptics-bio-auth-{holder_pid}"],
+                                env=clean_env,
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL,
+                                timeout=2,
+                            )
+                        if isinstance(actual_holder_uid, int):
+                            subprocess.run(
+                                ["pkill", "-u", str(actual_holder_uid), "-x", "identify.exe"],
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL,
+                            )
+                    # Guarantee at least one immediate flock attempt after preempting the holder
+                    post_preempt_retry = True
+                    time.sleep(0.05)
+                    continue
+                elif mode == "lockscreen":
+                    return None
+        finally:
+            if pidfd is not None:
+                try:
+                    os.close(pidfd)
+                except OSError:
+                    pass
 
         if time.monotonic() - start_t >= timeout:
             return None
         time.sleep(0.1)
 
 
-def release_hardware_lock(lock_fd):
+def ensure_calibration_permissions(opt_dir):
+    """
+    Ensure runtime-generated CalibrationData.blob and *.uint property files in opt_dir
+    have 0644 permissions (refusing symlinks) so unprivileged lockscreen sessions can
+    read them even when created under a restrictive root umask (e.g. 0027/0077).
+    """
+    if not opt_dir or not os.path.isdir(opt_dir):
+        return
+    candidates = [os.path.join(opt_dir, "CalibrationData.blob")]
+    candidates.extend(glob.glob(os.path.join(opt_dir, "*.uint")))
+    for path in candidates:
+        try:
+            if not os.path.exists(path) or os.path.islink(path):
+                continue
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+            try:
+                os.fchmod(fd, 0o644)
+            finally:
+                os.close(fd)
+        except OSError:
+            pass
+
+
+def release_hardware_lock(lock_fd, lock_paths=None):
     if lock_fd:
         try:
-            _, meta_path = get_lock_paths()
+            _, meta_path = lock_paths if lock_paths is not None else get_lock_paths()
             try:
                 mfd = os.open(meta_path, os.O_RDONLY | os.O_NOFOLLOW)
                 with os.fdopen(mfd, "r", encoding="utf-8") as fm:
@@ -777,7 +861,7 @@ def patch_enroll_binary(src_path, dst_path, target_user, target_uid, finger_id=1
 
     with open(dst_path, "wb") as f:
         f.write(data)
-    os.chmod(dst_path, 0o755)
+    os.chmod(dst_path, 0o700)
 
 
 def patch_delete_binary(src_path, dst_path, target_uid, finger_id=None):
@@ -818,7 +902,7 @@ def patch_delete_binary(src_path, dst_path, target_uid, finger_id=None):
 
     with open(dst_path, "wb") as f:
         f.write(data)
-    os.chmod(dst_path, 0o755)
+    os.chmod(dst_path, 0o700)
 
 
 def atomic_write_json(path, data, mode=0o644):
