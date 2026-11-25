@@ -7,6 +7,8 @@
 
 Turnkey Linux biometric authentication and enrollment solution for the proprietary **Synaptics / Validity Sensors WBDI (`06cb:0081`) Match-on-Chip** fingerprint reader.
 
+On **Ubuntu 26.04 amd64**, the [local fprintd package recipe](packaging/ubuntu/) is an alternative to the container/PAM setup below. Choose one stack per reader.
+
 ---
 
 ## Highlights

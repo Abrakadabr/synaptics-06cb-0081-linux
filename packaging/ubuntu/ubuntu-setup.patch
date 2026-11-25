@@ -1,0 +1,243 @@
+--- a/scripts/setup
++++ b/scripts/setup
+@@ -1,9 +1,10 @@
+-#!/usr/bin/env bash
++#!/bin/bash
+ set -Eeuo pipefail
+ umask 077
++export LC_ALL=C
++export PATH=/usr/sbin:/usr/bin
+ 
+ finger=right-index-finger
+-configure_pam=1
+ calibrate_only=0
+ sensor_state_dir=
+ 
+@@ -14,15 +15,14 @@
+ 
+ usage() {
+   cat <<'EOF'
+-Usage: synatudor-setup [--finger FINGER] [--no-pam] [--calibrate-only]
+-
+-Initializes a Synaptics 06cb:0081 reader, enrolls and verifies one finger,
+-then configures PAM on Omarchy. Password fallback is retained. This command
+-never issues the separate vendor-unpair maintenance operation.
++Usage: synatudor-setup [--finger FINGER] [--calibrate-only]
++
++Initializes a Synaptics 06cb:0081 reader on Ubuntu 26.04, then enrolls and
++verifies one finger for the invoking user. Never changes PAM or issues a
++vendor-unpair operation.
+ 
+ Options:
+   --finger FINGER    Finger to enroll (default: right-index-finger).
+-  --no-pam           Leave PAM configuration unchanged.
+   --calibrate-only   Initialize the reader without enrolling or changing PAM.
+   -h, --help         Show this help text.
+ EOF
+@@ -235,10 +235,6 @@
+       [[ -n $finger ]] || die '--finger requires a value'
+       shift
+       ;;
+-    --no-pam)
+-      configure_pam=0
+-      shift
+-      ;;
+     --calibrate-only)
+       calibrate_only=1
+       shift
+@@ -267,7 +263,6 @@
+     die 'could not identify the desktop user who invoked sudo'
+   self=$(readlink -f -- "$0") || die 'could not resolve this script path'
+   forwarded=(--finger "$finger")
+-  (( configure_pam )) || forwarded+=(--no-pam)
+   (( ! calibrate_only )) || forwarded+=(--calibrate-only)
+   exec sudo -H -u "$invoking_user" -- "$self" "${forwarded[@]}"
+ fi
+@@ -275,25 +270,21 @@
+ target_user=$(id -un) || die 'could not determine the current user'
+ [[ -t 0 && -t 1 ]] || die 'setup needs an interactive terminal'
+ [[ $(uname -m) == x86_64 ]] || die 'the pinned Windows driver requires x86-64 Linux'
+-[[ -e /etc/arch-release ]] || die 'this setup helper currently supports Arch Linux and Omarchy'
++. /etc/os-release
++[[ $ID == ubuntu && ${VERSION_ID:-} == 26.04 ]] || die 'this package requires Ubuntu 26.04'
+ sensor_path=$(find_sensor)
+ sensor_identity "$sensor_path"
+ unset sensor_path
+-pacman -Q synatudor-0081 libfprint-tod fprintd >/dev/null || \
+-  die 'install synatudor-0081, libfprint-tod, and fprintd first'
++for package in synatudor-0081 fprintd libfprint-2-2 libfprint-2-tod1; do
++  [[ $(dpkg-query -W -f='${db:Status-Status}' "$package:amd64" 2>/dev/null) == installed ]] ||
++    die "install the amd64 $package package first"
++done
+ command -v fprintd-list >/dev/null || die 'fprintd-list is unavailable'
+ [[ -x /usr/bin/fprintd-enroll ]] || die 'fprintd-enroll is unavailable'
+ command -v fprintd-verify >/dev/null || die 'fprintd-verify is unavailable'
+ command -v timeout >/dev/null || die 'timeout is unavailable'
+ command -v od >/dev/null || die 'od is unavailable'
+ [[ -x /usr/bin/synatudor-reset ]] || die 'synatudor-reset is unavailable'
+-
+-sudo -v
+-
+-pending_validation=$(ownership_reset_pending_validation)
+-if [[ $pending_validation == 1 ]]; then
+-  die 'a previous ownership reset has not passed normal-startup validation; no additional reset was issued. Run synatudor-reset-ownership to retry its non-destructive validation step'
+-fi
+ 
+ printf '%s\n' \
+   'The first initialization calibrates this individual reader.' \
+@@ -303,6 +294,13 @@
+ read -r -p 'Remove your finger, then type YES to continue: ' consent
+ [[ $consent == YES ]] || die 'setup canceled'
+ unset consent
++
++sudo -v
++
++pending_validation=$(ownership_reset_pending_validation)
++if [[ $pending_validation == 1 ]]; then
++  die 'a previous ownership reset has not passed validation; refusing to initialize the reader or change its state'
++fi
+ 
+ calibration=$(calibration_status "$sensor_state_file" "$sensor_calibration_id")
+ case $calibration in
+@@ -359,7 +357,7 @@
+ 
+ if [[ $failure_detected != 0 ]]; then
+   failure_count=$(ownership_failure_count)
+-  die "reader pairing did not reach the safe capture state after three ordinary starts (vendor attempt counter: $failure_count). No vendor-unpair request was issued; inspect the service log before choosing synatudor-reset-ownership explicitly"
++  die "reader pairing did not reach the safe capture state after three ordinary starts (vendor attempt counter: $failure_count). No vendor-unpair request was issued; inspect the fprintd and tudor-host-launcher service logs"
+ fi
+ unset pairing_attempt
+ 
+@@ -381,28 +379,22 @@
+   exit 0
+ fi
+ 
+-listing=$(fprintd-list "$target_user" 2>&1 || true)
+-if grep -Fq -- "$finger" <<<"$listing"; then
++listing=$(fprintd-list "$target_user") || die "could not list enrolled fingers for $target_user: $listing"
++# Both scan clients claim fprintd's default device. Never enroll on a different
++# reader, or skip enrollment because a finger was listed on another device.
++[[ ${listing%%$'\n'*} == 'found 1 devices' ]] ||
++  die 'fprintd must expose just the Synaptics reader; disconnect other fingerprint readers'
++if ! grep -Fxq -- "User $target_user has no fingers enrolled for Synaptics Tudor." <<<"$listing" &&
++   ! grep -Fxq -- "Fingerprints for user $target_user on Synaptics Tudor (press):" <<<"$listing"; then
++  die 'the device exposed by fprintd is not the Synaptics Tudor press reader'
++fi
++if grep -Eq "^ - #[0-9]+: $finger$" <<<"$listing"; then
+   printf '%s is already enrolled for %s.\n' "$finger" "$target_user"
+ else
+   enroll_finger "$finger" "$target_user"
+ fi
+ 
+-printf '\nVerify the enrolled finger once before authentication is enabled.\n\n'
++printf '\nVerify %s for %s.\n\n' "$finger" "$target_user"
+ fprintd-verify -f "$finger" "$target_user"
+ 
+-if (( ! configure_pam )); then
+-  printf 'Enrollment and verification succeeded. PAM was not changed.\n'
+-  exit 0
+-fi
+-
+-if [[ -x /usr/bin/omarchy-hw-laptop-closed && \
+-      -f /etc/pam.d/omarchy-lock-password ]]; then
+-  [[ -x /usr/lib/synatudor/omarchy-pam ]] || die 'Omarchy PAM helper is unavailable'
+-  sudo /usr/lib/synatudor/omarchy-pam apply --verified-user "$target_user"
+-  printf 'Fingerprint authentication is ready for sudo, polkit, and the Omarchy lock screen.\n'
+-else
+-  printf '%s\n' \
+-    'Enrollment and verification succeeded.' \
+-    'PAM was not changed because this system is not a supported Omarchy installation.'
+-fi
++printf 'Enrollment and verification succeeded. PAM was not changed.\n'
+--- a/scripts/reset
++++ b/scripts/reset
+@@ -1,8 +1,8 @@
+-#!/usr/bin/env bash
++#!/bin/bash
+ set -Eeuo pipefail
+ umask 077
+ export LC_ALL=C
+-export PATH=/usr/local/sbin:/usr/local/bin:/usr/bin
++export PATH=/usr/sbin:/usr/bin
+ 
+ SERVICE_MASK_OWNER_FILE=/run/synatudor-0081-runtime-masks
+ readonly -a FINGERPRINT_UNITS=(
+@@ -23,8 +23,8 @@
+ services. No enrollment, pairing, identity, or calibration state is removed;
+ only the previous safe-open status marker is cleared.
+ 
+-If ownership-reset validation is still pending, resume it with
+-synatudor-reset-ownership instead. This helper will not bypass that recovery.
++If an ownership-reset transaction or validation is pending, this helper stops
++without attempting recovery.
+ EOF
+ }
+ 
+@@ -91,10 +91,9 @@
+ [[ $sensor_serial =~ ^[0-9A-Fa-f]{12}$ ]] ||
+   die 'the fingerprint reader has an unsupported USB serial format'
+ sensor_state_dir=/var/lib/tudor/devices/06cb-0081-$sensor_serial
+-unset sensor_path sensor_serial
+ 
+ [[ -x /usr/bin/usbreset ]] || die 'usbreset is unavailable; install usbutils'
+-for command in flock mktemp stat sync systemctl timeout; do
++for command in flock mktemp stat sync systemctl timeout udevadm; do
+   command -v "$command" >/dev/null || die "$command is required"
+ done
+ 
+@@ -186,13 +185,13 @@
+     ((++found))
+     if [[ $extension != bool ]]; then
+       printf '%s\n' \
+-        'error: the ownership-reset validation marker has an invalid type; run synatudor-reset-ownership instead' >&2
++        'error: the ownership-reset validation marker has an invalid type; refusing ordinary reset' >&2
+       return 1
+     fi
+   done
+   if (( found > 1 )); then
+     printf '%s\n' \
+-      'error: the ownership-reset validation marker has conflicting types; run synatudor-reset-ownership instead' >&2
++      'error: the ownership-reset validation marker has conflicting types; refusing ordinary reset' >&2
+     return 1
+   fi
+   (( found == 1 )) || return 0
+@@ -226,7 +225,7 @@
+     0) return 0 ;;
+     1)
+       printf '%s\n' \
+-        'error: ownership-reset validation is pending; run synatudor-reset-ownership instead' >&2
++        'error: ownership-reset validation is pending; refusing ordinary reset' >&2
+       return 1
+       ;;
+     *)
+@@ -244,7 +243,7 @@
+   ownership_validation_allows_reset || return 1
+   ownership_transaction_is_absent || {
+     printf '%s\n' \
+-      'error: an ownership-reset transaction is pending; run synatudor-reset-ownership instead' >&2
++      'error: an ownership-reset transaction is pending; refusing ordinary reset' >&2
+     return 1
+   }
+ 
+@@ -359,7 +358,20 @@
+   sync -f -- "$sensor_state_dir" ||
+     die 'could not synchronize ownership-failure marker removal'
+ fi
+-/usr/bin/usbreset 06cb:0081
++# Address the exact device whose state marker we inspected, not the first
++# USB device which happens to match the VID:PID after services stopped.
++[[ $(find_sensor) == "$sensor_path" && -r $sensor_path/serial &&
++   $(<"$sensor_path/serial") == "$sensor_serial" ]] ||
++  die 'the attached fingerprint reader changed during reset'
++bus=$(<"$sensor_path/busnum")
++dev=$(<"$sensor_path/devnum")
++[[ $bus =~ ^[0-9]{1,3}$ && $dev =~ ^[0-9]{1,3}$ ]] ||
++  die 'could not determine the USB bus/device address'
++printf -v address '%03d/%03d' "$((10#$bus))" "$((10#$dev))"
++# Ubuntu's usbutils 019 can exit zero on open/ioctl failure. Its success
++# message is emitted only after USBDEVFS_RESET returns successfully.
++result=$(/usr/bin/usbreset "$address") || die "usbreset failed for $address: $result"
++[[ $result == 'Resetting '*" ... ok" ]] || die "usbreset failed for $address: $result"
+ udevadm settle --timeout=10
+ allow_service_activation ||
+   die 'could not restore fingerprint service activation'
