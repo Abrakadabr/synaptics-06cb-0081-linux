@@ -326,8 +326,22 @@ class TestHelperScripts(unittest.TestCase):
                 self.assertTrue(mod.apply_patch(qml))
                 # Permissions must remain 0644 even under umask 0077
                 self.assertEqual(stat.S_IMODE(os.stat(qml).st_mode), 0o644)
+                with open(qml, "r", encoding="utf-8") as f:
+                    patched_qml = f.read()
+                self.assertIn("property bool biometricPaused: false", patched_qml)
+                self.assertIn("!parent.biometricPaused", patched_qml)
+                self.assertIn('msg.includes("not \'")', patched_qml)
                 # Idempotent second run
                 self.assertTrue(mod.apply_patch(qml))
+                # Legacy-patched file (having biometricActive without biometricPaused) upgrades cleanly from backup
+                legacy_qml = patched_qml.replace("property bool biometricPaused: false\n", "").replace(
+                    "!parent.biometricPaused", '!root.notification.includes("Falling back")'
+                )
+                with open(qml, "w", encoding="utf-8") as f:
+                    f.write(legacy_qml)
+                self.assertTrue(mod.apply_patch(qml))
+                with open(qml, "r", encoding="utf-8") as f:
+                    self.assertIn("!parent.biometricPaused", f.read())
                 # Revert restores exact original
                 self.assertTrue(mod.revert_patch(qml))
             finally:
@@ -335,6 +349,25 @@ class TestHelperScripts(unittest.TestCase):
 
             with open(qml, "r", encoding="utf-8") as f:
                 self.assertEqual(f.read(), sample_qml)
+
+    def test_isolated_storage_conf_generation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_store = os.path.join(tmp, "static-store")
+            runtime_dir = os.path.join(tmp, "runtime")
+            # Uninitialized store returns None
+            self.assertIsNone(
+                bio.ensure_isolated_storage_conf(1000, tmp, store_candidates=(fake_store,), runtime_base=runtime_dir)
+            )
+            os.makedirs(os.path.join(fake_store, "overlay-images"))
+            conf_path = bio.ensure_isolated_storage_conf(
+                1000, tmp, store_candidates=(fake_store,), runtime_base=runtime_dir
+            )
+            self.assertIsNotNone(conf_path)
+            self.assertEqual(stat.S_IMODE(os.stat(conf_path).st_mode), 0o600)
+            with open(conf_path, "r", encoding="utf-8") as f:
+                cfg = f.read()
+            self.assertIn(f'"{fake_store}"', cfg)
+            self.assertIn('driver = "overlay"', cfg)
 
     def test_get_proc_ppid_current_process(self):
         self.assertEqual(bio.get_proc_ppid(os.getpid()), os.getppid())

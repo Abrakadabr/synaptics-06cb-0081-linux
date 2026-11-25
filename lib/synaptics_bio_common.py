@@ -10,12 +10,17 @@ import json
 import os
 import pwd
 import re
+import shutil
 import signal
 import struct
 import subprocess
 import time
 
 RUN_BIO_DIR = "/run/synaptics-bio"
+STATIC_STORE_CANDIDATES = (
+    "/usr/share/synaptics-bio/containers-storage",
+    "/usr/share/containers/storage",
+)
 IMAGE_CANDIDATES = [
     "localhost/wine:validity",
     "wine:validity",
@@ -47,6 +52,96 @@ def resolve_opt_dir(script_file):
     return None
 
 
+def ensure_isolated_storage_conf(uid, home_dir, store_candidates=STATIC_STORE_CANDIDATES, runtime_base=None):
+    """
+    Generate a private CONTAINERS_STORAGE_CONF referencing the read-only shared image store
+    so synaptics-bio never mutates /etc/containers/storage.conf.d or user Podman databases.
+    Returns the path to storage.conf, or None if no initialized static store is present.
+    """
+    static_store = None
+    for cand in store_candidates:
+        if os.path.isdir(os.path.join(cand, "overlay-images")):
+            static_store = cand
+            break
+    if not static_store:
+        return None
+
+    try:
+        if runtime_base is not None:
+            conf_dir = runtime_base
+            graph_root = os.path.join(runtime_base, "graph")
+            run_root = os.path.join(runtime_base, "run")
+            os.makedirs(conf_dir, mode=0o700, exist_ok=True)
+        elif uid == 0:
+            os.makedirs(RUN_BIO_DIR, mode=0o755, exist_ok=True)
+            conf_dir = RUN_BIO_DIR
+            run_root = os.path.join(RUN_BIO_DIR, "containers-run")
+            if os.path.isdir("/var/lib") and os.access("/var/lib", os.W_OK):
+                graph_root = "/var/lib/synaptics-bio/containers-storage"
+            else:
+                graph_root = os.path.join(RUN_BIO_DIR, "containers-graph")
+        else:
+            user_run = f"/run/user/{uid}"
+            if (
+                not os.path.isdir(user_run)
+                or os.path.islink(user_run)
+                or os.stat(user_run).st_uid != uid
+            ):
+                return None
+            conf_dir = user_run
+            run_root = os.path.join(user_run, "synaptics-bio-run")
+            local_share = os.path.join(home_dir, ".local", "share")
+            if os.path.isdir(home_dir) and os.access(home_dir, os.W_OK):
+                graph_root = os.path.join(local_share, "synaptics-bio", "containers-storage")
+            else:
+                graph_root = os.path.join(user_run, "synaptics-bio-graph")
+
+        os.makedirs(graph_root, mode=0o700, exist_ok=True)
+        os.makedirs(run_root, mode=0o700, exist_ok=True)
+
+        fuse_bin = shutil.which("fuse-overlayfs") or "/usr/bin/fuse-overlayfs"
+        overlay_section = ""
+        if os.path.isfile(fuse_bin):
+            overlay_section = f'\n[storage.options.overlay]\nmount_program = "{fuse_bin}"\n'
+
+        desired = (
+            '[storage]\n'
+            'driver = "overlay"\n'
+            f'graphroot = "{graph_root}"\n'
+            f'runroot = "{run_root}"\n\n'
+            '[storage.options]\n'
+            'additionalimagestores = [\n'
+            f'    "{static_store}"\n'
+            ']\n'
+            f'{overlay_section}'
+        )
+
+        conf_path = os.path.join(conf_dir, f"synaptics-bio-storage-{uid}.conf")
+        if os.path.isfile(conf_path) and not os.path.islink(conf_path):
+            try:
+                with open(conf_path, "r", encoding="utf-8") as f_cur:
+                    if f_cur.read() == desired:
+                        return conf_path
+            except OSError:
+                pass
+
+        tmp_conf = f"{conf_path}.tmp.{os.getpid()}"
+        fd = os.open(tmp_conf, os.O_CREAT | os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f_out:
+                f_out.write(desired)
+            os.replace(tmp_conf, conf_path)
+        except Exception:
+            try:
+                os.unlink(tmp_conf)
+            except OSError:
+                pass
+            return None
+        return conf_path
+    except Exception:
+        return None
+
+
 def get_clean_env(uid=None):
     """Return a sanitized environment dict for isolated Podman & Wine execution."""
     if uid is None:
@@ -59,6 +154,11 @@ def get_clean_env(uid=None):
     except Exception:
         clean_env["HOME"] = "/root" if uid == 0 else os.path.expanduser("~")
     clean_env["PATH"] = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    storage_conf = ensure_isolated_storage_conf(uid, clean_env["HOME"])
+    if storage_conf:
+        clean_env["CONTAINERS_STORAGE_CONF"] = storage_conf
+    else:
+        clean_env.pop("CONTAINERS_STORAGE_CONF", None)
     return clean_env
 
 

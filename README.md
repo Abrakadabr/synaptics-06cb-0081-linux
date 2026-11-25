@@ -60,7 +60,7 @@ Confirmed working on laptops equipped with the Synaptics WBDI USB ID `06cb:0081`
 |   winusb.sys / libusb passthrough                                                 |
 +-----------+-----------------------------------------------------------------------+
             |
-            v  /dev/bus/usb/001/xxx (MODE 0666, TAG uaccess)
+            v  /dev/bus/usb/001/xxx (MODE 0660, TAG uaccess)
 +-----------------------------------------------------------------------------------+
 | Physical Silicon (Synaptics 06cb:0081 Match-on-Chip)                              |
 |                                                                                   |
@@ -90,7 +90,7 @@ The installer will automatically:
 2. Check and install system prerequisites (`podman`, `python3`, `usbutils`, `zstd`) across Fedora, Ubuntu, Debian, or Arch Linux.
 3. Set up `/opt/synaptics-bio` structure and secure configuration permissions (`0755` directory, `0644` configs).
 4. Download the official Lenovo OEM driver (`huy103af07m6.exe`), extract required DLLs, verify SHA-256 checksums, and apply the Wine UMDF crash patch.
-5. Configure shared multi-user static container storage in `/usr/share/containers/storage` (`localhost/wine:validity`).
+5. Configure shared multi-user static container storage in `/usr/share/synaptics-bio/containers-storage` (`localhost/wine:validity`).
 6. Install udev permissions (`/etc/udev/rules.d/70-synaptics-bio.rules`), CLI helper tools to `/usr/local/bin/`, systemd-tmpfiles rule (`/etc/tmpfiles.d/synaptics-bio.conf`), and sleep/resume hooks.
 7. Configure PAM authentication stack for `sudo`, KDE Plasma lock screen, and Polkit (`/etc/pam.d/polkit-1`) with automatic `.orig-bio` backups, and apply KDE lockscreen UI responsiveness enhancements if detected.
 
@@ -237,19 +237,13 @@ If a user attempts to authenticate while another user's enrolled finger is touch
 [Fingerprint] Scanned finger belongs to 'kate', not 'alex'.
 ```
 
-### Static System Image Store (`/usr/share/containers/storage`)
+### Static System Image Store (`/usr/share/synaptics-bio/containers-storage`)
 
-When desktop users (e.g., `kate` or `alex` under KDE Plasma lock screen) authenticate, PAM executes within their unprivileged user session. To avoid duplicating the 1.37 GB Wine container image across individual user accounts (`~/.local/share/containers/storage`), the installer configures a static system image store:
+When desktop users (e.g., `kate` or `alex` under KDE Plasma lock screen) authenticate, PAM executes within their unprivileged user session. To avoid duplicating the 1.37 GB Wine container image across individual user accounts (`~/.local/share/containers/storage`) while leaving the system's normal Podman configuration untouched, the installer sets up an isolated static image store:
 
-1. **Dedicated Read-Only Store:** The image is installed once into `/usr/share/containers/storage` with global read/execute permissions (`a+rX`).
-2. **System-Wide Drop-in:** `/etc/containers/storage.conf.d/99-synaptics-bio.conf` declares:
-   ```toml
-   [storage.options]
-   additionalimagestores = [
-       "/usr/share/containers/storage"
-   ]
-   ```
-3. **Lock & Collision Free:** Because `/usr/share/containers/storage` is separate from root's active graphroot (`/var/lib/containers/storage`), root never creates volatile layers or runtime lock files there. All users (`alex`, `kate`, and future accounts) share the single container image read-only with zero disk overhead and zero lock collisions.
+1. **Dedicated Read-Only Store:** The image is installed once into `/usr/share/synaptics-bio/containers-storage` with global read/execute permissions (`a+rX`).
+2. **Per-Session `CONTAINERS_STORAGE_CONF` Isolation:** At runtime, `synaptics-bio-*` generates a private `storage.conf` pointing `additionalimagestores` at `/usr/share/synaptics-bio/containers-storage` with a dedicated `synaptics-bio` graphroot — never modifying `/etc/containers/storage.conf.d/` or interfering with standard rootful/rootless Podman containers.
+3. **Lock & Collision Free:** Because `/usr/share/synaptics-bio/containers-storage` is separate from every active writable graphroot, root never creates volatile layers or runtime lock files there. All users share the single container image read-only with zero disk overhead and zero lock collisions.
 
 ---
 

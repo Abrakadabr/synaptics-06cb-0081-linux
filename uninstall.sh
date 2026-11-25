@@ -74,14 +74,24 @@ if [ -f "/etc/udev/rules.d/70-synaptics-bio.rules" ]; then
     echo "Removed /etc/udev/rules.d/70-synaptics-bio.rules."
 fi
 
-# 5. Remove Multi-User Shared Container Storage Drop-in and Static Store
+# 5. Remove Dedicated Synaptics Static Image Store and Legacy Drop-ins
 rm -f "/etc/containers/storage.conf.d/99-synaptics-bio.conf"
 rm -f "/etc/containers/storage.rootless.conf.d/99-synaptics-bio.conf"
-if [ -d "/usr/share/containers/storage" ]; then
-    rm -rf "/usr/share/containers/storage"
-    echo "Removed /usr/share/containers/storage."
+if [ -d "/usr/share/synaptics-bio" ]; then
+    rm -rf "/usr/share/synaptics-bio"
+    echo "Removed /usr/share/synaptics-bio."
 fi
-echo "Removed multi-user container storage drop-ins."
+if [ -d "/var/lib/synaptics-bio" ]; then
+    rm -rf "/var/lib/synaptics-bio"
+    echo "Removed /var/lib/synaptics-bio."
+fi
+# Safely untag our images from legacy /usr/share/containers/storage without deleting unrelated images
+if [ -d "/usr/share/containers/storage/overlay-images" ] && command -v podman >/dev/null 2>&1; then
+    podman --root /usr/share/containers/storage --runroot /run/synaptics-bio/uninstall-run \
+        rmi localhost/wine:validity wine:validity ghcr.io/abrakadabr/synaptics-06cb-0081-linux:latest 2>/dev/null || true
+    rm -rf /run/synaptics-bio/uninstall-run 2>/dev/null || true
+fi
+echo "Cleaned up container storage state."
 
 # 6. Remove CLI wrappers, sleep hook, systemd watcher, tmpfiles config, and locks
 systemctl disable --now synaptics-bio-lockscreen.path synaptics-bio-lockscreen.service 2>/dev/null || true

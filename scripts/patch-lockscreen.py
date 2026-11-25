@@ -35,8 +35,13 @@ def apply_patch(qml_path, force=False):
 
     backup_path = qml_path + ".orig-bio"
 
-    # If the live file is already patched and --force was not requested, do nothing (idempotent for systemd.path)
-    if "biometricActive" in live_content and "onNoninteractiveInfo" in live_content and not force:
+    # If the live file is already patched with the current schema and --force was not requested, do nothing (idempotent for systemd.path)
+    if (
+        "biometricActive" in live_content
+        and "!parent.biometricPaused" in live_content
+        and "onNoninteractiveInfo" in live_content
+        and not force
+    ):
         print(f"'{qml_path}' is already patched.")
         return True
 
@@ -49,7 +54,8 @@ def apply_patch(qml_path, force=False):
     with open(backup_path, "r", encoding="utf-8") as f:
         content = f.read()
 
-    # 1. Update handleMessage to ignore empty strings, replace fingerprint messages, and refresh fadeout timer
+    # 1. Update handleMessage to ignore empty strings, track terminal biometric pause state,
+    #    replace fingerprint messages, and refresh fadeout timer
     old_handles = [
         """    function handleMessage(msg) {
         if (!msg) {
@@ -97,6 +103,11 @@ def apply_patch(qml_path, force=False):
     new_handle = """    function handleMessage(msg) {
         if (!msg) {
             return;
+        }
+        if (msg.includes("Falling back") || msg.includes("Adjust finger or use password") || msg.includes("not '")) {
+            lockScreenRoot.biometricPaused = true;
+        } else if (msg.startsWith("[Fingerprint") || msg.startsWith("Fingerprint")) {
+            lockScreenRoot.biometricPaused = false;
         }
         if (!root.notification || msg.startsWith("[Fingerprint") || msg.startsWith("Fingerprint")) {
             root.notification = msg;
@@ -159,6 +170,7 @@ def apply_patch(qml_path, force=False):
         function onAboutToSuspend() {
             root.clearPassword();
             root.notification = "";
+            lockScreenRoot.biometricPaused = false;
             lockScreenRoot.uiVisible = true;
             fadeoutTimer.restart();
         }
@@ -167,13 +179,14 @@ def apply_patch(qml_path, force=False):
     if old_suspend in content:
         content = content.replace(old_suspend, new_suspend, 1)
 
-    # 4. Add biometricActive to blockUI (supports both Plasma 6.7.5+ Keyboards.KWinVirtualKeyboard and older inputPanel)
+    # 4. Add biometricActive and biometricPaused to lockScreenRoot (supports Plasma 6.7.5+ and older inputPanel)
     old_block_ui_kwin = """        property bool uiVisible: false
         property bool seenPositionChange: false
         property bool blockUI: containsMouse && (mainStack.depth > 1 || mainBlock.mainPasswordBox.text.length > 0 || Keyboards.KWinVirtualKeyboard.visible)"""
 
     new_block_ui_kwin = """        property bool uiVisible: false
         property bool seenPositionChange: false
+        property bool biometricPaused: false
         readonly property bool biometricActive: (root.notification.startsWith("[Fingerprint") || root.notification.startsWith("Fingerprint"))
             && !root.notification.includes("Falling back")
             && !root.notification.includes("Adjust finger or use password")
@@ -186,6 +199,7 @@ def apply_patch(qml_path, force=False):
 
     new_block_ui_legacy = """        property bool uiVisible: false
         property bool seenPositionChange: false
+        property bool biometricPaused: false
         readonly property bool biometricActive: (root.notification.startsWith("[Fingerprint") || root.notification.startsWith("Fingerprint"))
             && !root.notification.includes("Falling back")
             && !root.notification.includes("Adjust finger or use password")
@@ -197,7 +211,7 @@ def apply_patch(qml_path, force=False):
     elif old_block_ui_legacy in content:
         content = content.replace(old_block_ui_legacy, new_block_ui_legacy, 1)
 
-    # 5. Guard authenticator.startAuthenticating() inside if (uiVisible)
+    # 5. Guard authenticator.startAuthenticating() inside if (uiVisible) and reset biometricPaused across visibility transitions
     old_on_ui_visible = """        onUiVisibleChanged: {
             if (uiVisible) {
                 Window.window.requestActivate();
@@ -212,6 +226,7 @@ def apply_patch(qml_path, force=False):
         }"""
 
     new_on_ui_visible = """        onUiVisibleChanged: {
+            biometricPaused = false;
             if (uiVisible) {
                 Window.window.requestActivate();
                 authenticator.startAuthenticating();
@@ -227,7 +242,7 @@ def apply_patch(qml_path, force=False):
     if old_on_ui_visible in content:
         content = content.replace(old_on_ui_visible, new_on_ui_visible, 1)
 
-    # 6. Pause 1000ms heartbeat Timer once fingerprint scan times out or exhausts attempts until fadeout/wake clears root.notification
+    # 6. Pause 1000ms heartbeat Timer once fingerprint scan times out, fails, or hits wrong user until fadeout/wake resets biometricPaused
     old_heartbeat = """        Timer { // heart beat keeping the backend active for as long as we are in visible state
             interval: 1000
             running: !authenticator.unlocked && parent.uiVisible
@@ -237,7 +252,7 @@ def apply_patch(qml_path, force=False):
 
     new_heartbeat = """        Timer { // heart beat keeping the backend active for as long as we are in visible state
             interval: 1000
-            running: !authenticator.unlocked && parent.uiVisible && !root.notification.includes("Falling back") && !root.notification.includes("Adjust finger or use password")
+            running: !authenticator.unlocked && parent.uiVisible && !parent.biometricPaused
             repeat: true
             onTriggered: authenticator.startAuthenticating()
         }"""
@@ -274,7 +289,7 @@ def apply_patch(qml_path, force=False):
     if old_on_exited in content:
         content = content.replace(old_on_exited, new_on_exited, 1)
 
-    # 8. Clear notification on Escape key press so next wake-up starts fresh fingerprint auth
+    # 8. Clear notification and pause state on Escape key press so next wake-up starts fresh fingerprint auth
     old_escape_kwin = """        Keys.onEscapePressed: {
             // If the escape key is pressed, kscreenlocker will turn off the screen.
             // We do not want to show the password prompt in this case.
@@ -297,6 +312,7 @@ def apply_patch(qml_path, force=False):
                 }
                 root.clearPassword();
                 root.notification = "";
+                biometricPaused = false;
             }
         }"""
 
@@ -322,6 +338,7 @@ def apply_patch(qml_path, force=False):
                 }
                 root.clearPassword();
                 root.notification = "";
+                biometricPaused = false;
             }
         }"""
 
@@ -386,6 +403,7 @@ def apply_patch(qml_path, force=False):
         ("handleMessage", 'msg.startsWith("[Fingerprint")'),
         ("noninteractive signals", "onNoninteractiveInfo"),
         ("biometricActive", "biometricActive"),
+        ("heartbeat pause", "!parent.biometricPaused"),
         ("fadeout timer", "interval: 15000"),
     )
     missing_markers = [name for name, marker in required_markers if marker not in content]

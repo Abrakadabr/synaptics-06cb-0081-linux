@@ -511,7 +511,7 @@ def main():
         sys.exit(0)
     elif wrong_user_desc:
         if not quiet_mode:
-            if compact_mode:
+            if compact_mode or lockscreen_mode:
                 print(f"[Fingerprint] Scanned finger belongs to '{wrong_user_desc}', not '{target_user}'.", flush=True)
             else:
                 print(f"\n[Fingerprint] Scanned finger belongs to '{wrong_user_desc}', not '{target_user}'.", flush=True)
